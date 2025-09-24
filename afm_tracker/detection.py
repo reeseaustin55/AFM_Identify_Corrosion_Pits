@@ -53,7 +53,11 @@ class DetectionMixin:
 
     def detect_pit_edge(self, image: np.ndarray, seed_point, method: int = 0):
         x, y = int(seed_point[0]), int(seed_point[1])
-        method_order = ((method % 3), (method + 1) % 3, (method + 2) % 3)
+        base_methods = ((method % 3), (method + 1) % 3, (method + 2) % 3)
+        method_order = list(base_methods)
+        if getattr(self, "large_pit_mode", False):
+            # Large pits often benefit from the adaptive component grower, try it first
+            method_order = [3] + [m for m in method_order if m != 3]
 
         for half in self._roi_halves_for_image(image):
             bounds = roi_bounds(x, y, half=half, shape=image.shape)
@@ -64,6 +68,18 @@ class DetectionMixin:
                     comp = self._height_threshold_component(roi, x - bounds.x0, y - bounds.y0)
                 elif m == 1:
                     comp = self._watershed_component(roi, x - bounds.x0, y - bounds.y0)
+                elif m == 3:
+                    comp = self._adaptive_large_component(
+                        roi,
+                        x - bounds.x0,
+                        y - bounds.y0,
+                        touches_image_edge=(
+                            bounds.x0 == 0
+                            or bounds.y0 == 0
+                            or bounds.x1 == image.shape[1]
+                            or bounds.y1 == image.shape[0]
+                        ),
+                    )
                 else:
                     comp = self._snake_component(roi, x - bounds.x0, y - bounds.y0)
 
@@ -152,6 +168,69 @@ class DetectionMixin:
         if len(pts) >= 3:
             cv2.fillPoly(mask, [pts], 1)
         return mask.astype(bool) if mask.any() else None
+
+    def _adaptive_large_component(
+        self,
+        roi: np.ndarray,
+        x: int,
+        y: int,
+        touches_image_edge: bool = False,
+    ):
+        """Grow a smooth component around ``(x, y)`` that can span large pits."""
+
+        if not (0 <= x < roi.shape[1] and 0 <= y < roi.shape[0]):
+            return None
+
+        roi_float = roi.astype(np.float32)
+        blur = cv2.GaussianBlur(roi_float, (0, 0), sigmaX=2.0, sigmaY=2.0)
+        norm = cv2.normalize(blur, None, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
+        if not np.isfinite(norm).all():
+            norm = blur
+
+        seed_val = norm[y, x]
+        if not np.isfinite(seed_val):
+            return None
+
+        candidate = None
+        for offset in np.linspace(0.05, 0.35, 7):
+            thr = seed_val + offset
+            mask = norm <= thr
+            if mask.sum() < 50:
+                continue
+            mask = morphology.binary_opening(mask, morphology.disk(3))
+            mask = morphology.binary_closing(mask, morphology.disk(5))
+            mask = morphology.remove_small_holes(mask, area_threshold=256)
+            mask = morphology.remove_small_objects(mask, 196)
+            comp = self._seed_component(mask, x, y)
+            if comp is None or not comp.any():
+                continue
+            if component_touches_edge(comp):
+                if touches_image_edge:
+                    # The ROI is clipped by the frame edge; avoid partial pits.
+                    continue
+                # Otherwise try to give the detector another chance with a larger ROI.
+                candidate = comp
+                continue
+            candidate = comp
+            break
+
+        if candidate is None or not candidate.any():
+            return None
+
+        return candidate
+
+    def _seed_component(self, mask: np.ndarray, x: int, y: int):
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        if not mask.any():
+            return None
+        labeled = measure.label(mask)
+        if not (0 <= y < labeled.shape[0] and 0 <= x < labeled.shape[1]):
+            return None
+        lbl = labeled[y, x]
+        if lbl == 0:
+            return None
+        return labeled == lbl
 
     # --- Similar pit search ---------------------------------------------------
     def _compute_ref_stats(self, reference_profiles: List[dict]):

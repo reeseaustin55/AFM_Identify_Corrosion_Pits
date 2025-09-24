@@ -294,9 +294,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         if not mask.any():
             print("Lasso region empty")
             return
-        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        contour = self._fit_drawn_mask(mask)
         if contour is None:
-            print("Lasso failed to create contour")
+            print("Lasso failed to fit a pit to the selection")
             return
         self._add_contour_as_pit(contour)
         self._deactivate_tools()
@@ -339,9 +339,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         ygrid, xgrid = np.mgrid[0:ny, 0:nx]
         mask = (xgrid - cx0) ** 2 + (ygrid - cy0) ** 2 <= r ** 2
         mask = morphology.binary_closing(mask, morphology.disk(2))
-        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        contour = self._fit_drawn_mask(mask)
         if contour is None:
-            print("Circle ROI failed to create contour")
+            print("Circle ROI failed to fit a pit")
             return
         self._add_contour_as_pit(contour)
         self._deactivate_tools()
@@ -382,9 +382,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         pts = np.vstack((xgrid.ravel(), ygrid.ravel())).T
         mask = path.contains_points(pts).reshape((ny, nx))
         mask = morphology.binary_closing(mask, morphology.disk(2))
-        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        contour = self._fit_drawn_mask(mask)
         if contour is None:
-            print("Manual trace failed to create contour")
+            print("Manual trace failed to fit a pit")
             return
         self._add_contour_as_pit(contour)
         self._deactivate_tools()
@@ -397,6 +397,19 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     def _add_contour_as_pit(self, contour: np.ndarray):
         if self.current_image_idx not in self.pits:
             self.pits[self.current_image_idx] = {}
+        shape = self.images[self.current_image_idx].shape
+        new_mask = mask_from_contour(contour, shape)
+        if new_mask.sum() < 20:
+            print("Pit too small to add.")
+            return
+        for ex_id, ex_contour in self.pits[self.current_image_idx].items():
+            existing_mask = mask_from_contour(ex_contour, shape)
+            if (new_mask & existing_mask).any():
+                print("Adjusting pit to avoid crossing existing pits.")
+                return
+            if self.contains(ex_contour, contour, shape) or self.contains(contour, ex_contour, shape):
+                print("Adjusting pit to avoid crossing existing pits.")
+                return
         pit_id = self.next_pit_id
         self.next_pit_id += 1
         self.pits[self.current_image_idx][pit_id] = contour
@@ -405,6 +418,49 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             self.pit_profiles[pit_id] = profile
         self.selected_pit_ids = [pit_id]
         print(f"Added pit {pit_id} via interactive tool")
+
+    def _fit_drawn_mask(self, mask: np.ndarray):
+        """Refine a drawn mask using the detector while respecting the selection."""
+
+        image = self.images[self.current_image_idx]
+        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        if contour is None:
+            return None
+
+        cy = float(np.mean(contour[:, 0]))
+        cx = float(np.mean(contour[:, 1]))
+        base_mask = mask.astype(bool)
+        best = None
+        best_score = -np.inf
+
+        for method in range(3):
+            candidate = self.detect_pit_edge(image, (cx, cy), method=method)
+            if candidate is None:
+                continue
+            cand_mask = mask_from_contour(candidate, image.shape)
+            if cand_mask.sum() == 0:
+                continue
+            overlap = (base_mask & cand_mask).sum() / (base_mask.sum() + 1e-6)
+            if overlap < 0.6:
+                continue
+            spill = (cand_mask & ~base_mask).sum() / (base_mask.sum() + 1e-6)
+            score = overlap - 0.25 * spill
+            if score > best_score:
+                best_score = score
+                best = candidate
+
+        if best is None:
+            best = contour
+
+        aligned = align_contour_to_gradient(best, image)
+        if aligned is not None:
+            aligned_mask = mask_from_contour(aligned, image.shape)
+            if aligned_mask.sum() > 0:
+                overlap = (base_mask & aligned_mask).sum() / (base_mask.sum() + 1e-6)
+                if overlap >= 0.6:
+                    best = aligned
+
+        return best
 
     def on_click(self, event):
         if event.inaxes != self.ax:
