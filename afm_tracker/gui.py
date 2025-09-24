@@ -697,7 +697,12 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                     max_outward=max(shape) * 0.12,
                     inward=6.0,
                 ) or combined_contour
-        if mask_from_contour(refined, shape).sum() < np.count_nonzero(mask) * 0.5:
+        large_refine = self._refine_large_contour(refined, self.images[self.current_image_idx])
+        if large_refine is not None:
+            refined = large_refine
+
+        refined_mask = mask_from_contour(refined, shape).astype(bool)
+        if refined_mask.sum() < np.count_nonzero(mask) * 0.5:
             return None
         return refined
 

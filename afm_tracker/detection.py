@@ -5,10 +5,15 @@ from typing import List, Sequence
 
 import cv2
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, binary_fill_holes
 from scipy.signal import find_peaks
 from skimage import morphology, measure
-from skimage.segmentation import watershed, active_contour
+from skimage.segmentation import (
+    watershed,
+    active_contour,
+    morphological_geodesic_active_contour,
+    inverse_gaussian_gradient,
+)
 
 from .profile import extract_pit_profile
 from .utils import (
@@ -84,6 +89,10 @@ class DetectionMixin:
                 contour = contour_roi.copy()
                 contour[:, 1] += bounds.x0
                 contour[:, 0] += bounds.y0
+
+                contour = self._refine_large_contour(contour, image)
+                if contour is None:
+                    continue
 
                 if point_in_contour(contour, x, y, image.shape):
                     return contour
@@ -265,3 +274,83 @@ class DetectionMixin:
 
     def _contains(self, *args, **kwargs):  # pragma: no cover - forwarded to utils
         return self.contains(*args, **kwargs)
+
+    # --- Large pit refinement helpers ---------------------------------------
+    def _refine_large_contour(self, contour: np.ndarray, image: np.ndarray):
+        if contour is None or len(contour) < 3:
+            return contour
+
+        mask = mask_from_contour(contour, image.shape).astype(bool)
+        area = int(mask.sum())
+        if area == 0:
+            return contour
+
+        h, w = image.shape
+        area_ratio = area / float(h * w)
+        ys = np.any(mask, axis=1)
+        xs = np.any(mask, axis=0)
+        height = int(ys.sum())
+        width = int(xs.sum())
+        max_span = max(height, width)
+        if area_ratio < 0.04 and max_span < int(min(h, w) * 0.38):
+            return contour
+
+        refined_mask = self._geodesic_refine_mask(mask, image)
+        if refined_mask is None or not refined_mask.any():
+            return contour
+
+        new_contour = mask_to_closed_contour(refined_mask.astype(np.uint8))
+        if new_contour is None or len(new_contour) < 3:
+            return contour
+
+        return new_contour
+
+    def _geodesic_refine_mask(self, mask: np.ndarray, image: np.ndarray):
+        coords = np.column_stack(np.where(mask))
+        if coords.size == 0:
+            return None
+
+        y0 = max(0, int(coords[:, 0].min()))
+        y1 = min(image.shape[0], int(coords[:, 0].max()) + 1)
+        x0 = max(0, int(coords[:, 1].min()))
+        x1 = min(image.shape[1], int(coords[:, 1].max()) + 1)
+        pad = max(10, int(round(max(y1 - y0, x1 - x0) * 0.08)))
+        y0 = max(0, y0 - pad)
+        y1 = min(image.shape[0], y1 + pad)
+        x0 = max(0, x0 - pad)
+        x1 = min(image.shape[1], x1 + pad)
+
+        roi_img = image[y0:y1, x0:x1].astype(np.float32)
+        if roi_img.size == 0:
+            return None
+        roi_mask = mask[y0:y1, x0:x1].astype(bool)
+        if not roi_mask.any():
+            return None
+
+        roi_min = float(roi_img.min())
+        roi_ptp = float(roi_img.max() - roi_min)
+        if roi_ptp < 1e-3:
+            return None
+        roi_norm = (roi_img - roi_min) / (roi_ptp + 1e-6)
+
+        gimage = inverse_gaussian_gradient(roi_norm, alpha=70, sigma=2)
+        dilate_r = max(2, int(round(max(roi_mask.shape) / 120)))
+        init_ls = morphology.binary_dilation(roi_mask, morphology.disk(dilate_r))
+        mgac = morphological_geodesic_active_contour(
+            gimage,
+            iterations=220,
+            init_level_set=init_ls,
+            smoothing=3,
+            balloon=1,
+        )
+        mgac = morphology.binary_closing(mgac, morphology.disk(2))
+        mgac = binary_fill_holes(mgac)
+        mgac = morphology.remove_small_objects(mgac, min_size=max(32, int(0.01 * roi_mask.sum())))
+        if not np.any(mgac):
+            return None
+        if not np.all(roi_mask <= mgac):
+            mgac = np.logical_or(mgac, roi_mask)
+
+        refined = np.zeros_like(mask, dtype=bool)
+        refined[y0:y1, x0:x1] = mgac
+        return refined
