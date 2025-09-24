@@ -691,12 +691,13 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             combined = binary_fill_holes(combined)
             combined_contour = mask_to_closed_contour(combined.astype(np.uint8))
             if combined_contour is not None:
-                refined = align_contour_to_gradient(
+                combined_refined = align_contour_to_gradient(
                     combined_contour,
                     self.images[self.current_image_idx],
                     max_outward=max(shape) * 0.12,
                     inward=6.0,
-                ) or combined_contour
+                )
+                refined = combined_refined if combined_refined is not None else combined_contour
         large_refine = self._refine_large_contour(refined, self.images[self.current_image_idx])
         if large_refine is not None:
             refined = large_refine

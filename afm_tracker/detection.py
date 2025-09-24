@@ -338,11 +338,12 @@ class DetectionMixin:
         init_ls = morphology.binary_dilation(roi_mask, morphology.disk(dilate_r))
         mgac = morphological_geodesic_active_contour(
             gimage,
-            iterations=220,
+            220,
             init_level_set=init_ls,
             smoothing=3,
             balloon=1,
         )
+        mgac = mgac.astype(bool)
         mgac = morphology.binary_closing(mgac, morphology.disk(2))
         mgac = binary_fill_holes(mgac)
         mgac = morphology.remove_small_objects(mgac, min_size=max(32, int(0.01 * roi_mask.sum())))
