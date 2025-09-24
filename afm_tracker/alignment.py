@@ -47,78 +47,29 @@ def align_contour_to_gradient(
     grad_mag = cv2.magnitude(grad_x, grad_y)
 
     centroid = np.mean(contour, axis=0)
-    contour = np.asarray(contour, dtype=np.float32)
-    span = max(float(np.ptp(contour[:, 0])), float(np.ptp(contour[:, 1])))
-    effective_outward = max(max_outward, span * 0.12)
-    effective_inward = max(inward, span * 0.04)
-    search_distances = np.linspace(-effective_inward, effective_outward, 80)
+    search_distances = np.linspace(-inward, max_outward, 48)
     h, w = image.shape
     new_points = []
 
-    prev_pts = np.roll(contour, 1, axis=0)
-    next_pts = np.roll(contour, -1, axis=0)
-
-    for idx, (y, x) in enumerate(contour):
-        tangent = next_pts[idx] - prev_pts[idx]
-        t_norm = np.linalg.norm(tangent)
-        if t_norm < 1e-6:
-            direction = np.array([y - centroid[0], x - centroid[1]], dtype=np.float32)
-            norm = np.linalg.norm(direction)
-            if norm < 1e-3:
-                new_points.append([y, x])
-                continue
-            normal = direction / norm
-        else:
-            tangent /= t_norm
-            normal = np.array([-tangent[1], tangent[0]], dtype=np.float32)
-            radial = np.array([y - centroid[0], x - centroid[1]], dtype=np.float32)
-            if np.dot(normal, radial) < 0:
-                normal *= -1.0
-        normal_norm = np.linalg.norm(normal)
-        if normal_norm < 1e-6:
+    for (y, x) in contour:
+        direction = np.array([y - centroid[0], x - centroid[1]], dtype=np.float32)
+        norm = np.linalg.norm(direction)
+        if norm < 1e-3:
             new_points.append([y, x])
             continue
-        normal /= normal_norm
+        direction /= norm
 
-        scores = []
-        candidates = []
+        best_score = -np.inf
+        best_point = np.array([y, x], dtype=np.float32)
         for dist in search_distances:
-            sy = y + normal[0] * dist
-            sx = x + normal[1] * dist
+            sy = y + direction[0] * dist
+            sx = x + direction[1] * dist
             if sy < 0 or sy >= h or sx < 0 or sx >= w:
-                scores.append(-np.inf)
-                candidates.append(np.array([sy, sx], dtype=np.float32))
                 continue
-            grad_score = _bilinear_interpolate(grad_mag, sy, sx)
-            gx = _bilinear_interpolate(grad_x, sy, sx)
-            gy = _bilinear_interpolate(grad_y, sy, sx)
-            gvec = np.array([gy, gx], dtype=np.float32)
-            gnorm = np.linalg.norm(gvec) + 1e-6
-            alignment = max(0.0, float(np.dot(gvec, normal)) / gnorm)
-            # Encourage near, well-aligned edges. Penalize large jumps more heavily
-            # as the search moves farther away from the original contour.
-            penalty = 0.02 * (max(dist, 0.0) ** 2) + 0.01 * (abs(dist) ** 1.5)
-            scores.append((grad_score * (0.6 + 0.4 * alignment)) - penalty)
-            candidates.append(np.array([sy, sx], dtype=np.float32))
-
-        if not scores:
-            new_points.append([y, x])
-            continue
-
-        smooth_scores = gaussian_filter1d(np.array(scores, dtype=np.float32), sigma=1.5, mode="reflect")
-        outward_mask = search_distances >= 0
-        best_idx = int(np.argmax(smooth_scores))
-        if outward_mask.any():
-            outward_scores = smooth_scores[outward_mask]
-            outward_idx = np.argmax(outward_scores)
-            # Prefer the best outward candidate unless the global optimum is
-            # significantly stronger (prevents jumping across the pit interior).
-            if outward_scores[outward_idx] > smooth_scores[best_idx] - 0.15:
-                best_idx = int(np.nonzero(outward_mask)[0][outward_idx])
-        best_point = candidates[best_idx]
-        # Fallback if the search wandered outside the image.
-        if not (0 <= best_point[0] < h and 0 <= best_point[1] < w):
-            best_point = np.array([y, x], dtype=np.float32)
+            score = _bilinear_interpolate(grad_mag, sy, sx)
+            if score > best_score:
+                best_score = score
+                best_point = np.array([sy, sx], dtype=np.float32)
         new_points.append(best_point)
 
     new_contour = np.array(new_points, dtype=np.float32)
