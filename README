@@ -1,1 +1,34 @@
+# AFM Corrosion Pit Tracker
 
+This project provides interactive tools for identifying and tracking corrosion pits in AFM image sequences.
+
+## Running the tool
+
+```bash
+python main.py
+```
+
+You will be prompted to select a directory containing grayscale PNG AFM images. Once loaded, the interactive viewer exposes a number of tools for curating pit contours.
+
+## Key features
+
+- Add, select, and manually sketch pit contours.
+- Automatic refinement routines including refitting and auto-similar detection.
+- Frame-to-frame tracking with drift correction.
+- **Align Edge** tool to snap the selected pit boundary to the strongest nearby slope.
+- Export of annotated frames and optional corrosion rate summaries.
+
+## Code structure
+
+- `main.py`: entry point that boots the interactive application.
+- `afm_tracker/loader.py`: image loading and metadata extraction.
+- `afm_tracker/detection.py`: pit boundary detection and auto-similar search utilities.
+- `afm_tracker/tracking.py`: drift correction and cross-frame pit assignment.
+- `afm_tracker/profile.py`: contour-based pit feature extraction.
+- `afm_tracker/alignment.py`: gradient-based contour alignment helpers.
+- `afm_tracker/utils.py`: shared geometry and mask utilities.
+- `afm_tracker/gui.py`: the main `SmartPitTracker` GUI class tying everything together.
+
+## Requirements
+
+The scripts rely on NumPy, OpenCV, Matplotlib, scikit-image, SciPy, and pandas.
