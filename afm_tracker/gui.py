@@ -13,7 +13,8 @@ import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.path import Path as MplPath
 from matplotlib.widgets import Button, LassoSelector
-from skimage import morphology
+from scipy.ndimage import binary_fill_holes
+from skimage import measure, morphology
 
 from .alignment import align_contour_to_gradient
 from .detection import DetectionMixin
@@ -284,9 +285,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         if not mask.any():
             print("Lasso region empty")
             return
-        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        contour = self._fit_mask_to_pit(mask)
         if contour is None:
-            print("Lasso failed to create contour")
+            print("Lasso failed to create a valid pit from the region")
             return
         self._add_contour_as_pit(contour)
         self._deactivate_tools()
@@ -329,9 +330,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         ygrid, xgrid = np.mgrid[0:ny, 0:nx]
         mask = (xgrid - cx0) ** 2 + (ygrid - cy0) ** 2 <= r ** 2
         mask = morphology.binary_closing(mask, morphology.disk(2))
-        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        contour = self._fit_mask_to_pit(mask)
         if contour is None:
-            print("Circle ROI failed to create contour")
+            print("Circle ROI failed to create a valid pit")
             return
         self._add_contour_as_pit(contour)
         self._deactivate_tools()
@@ -372,9 +373,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         pts = np.vstack((xgrid.ravel(), ygrid.ravel())).T
         mask = path.contains_points(pts).reshape((ny, nx))
         mask = morphology.binary_closing(mask, morphology.disk(2))
-        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        contour = self._fit_mask_to_pit(mask)
         if contour is None:
-            print("Manual trace failed to create contour")
+            print("Manual trace failed to create a valid pit")
             return
         self._add_contour_as_pit(contour)
         self._deactivate_tools()
@@ -385,8 +386,19 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Pit management helpers
     # ------------------------------------------------------------------
     def _add_contour_as_pit(self, contour: np.ndarray):
+        if contour is None or len(contour) < 3:
+            return
         if self.current_image_idx not in self.pits:
             self.pits[self.current_image_idx] = {}
+        cx = float(np.mean(contour[:, 1]))
+        cy = float(np.mean(contour[:, 0]))
+        contour = self._enforce_no_overlap(
+            contour,
+            self.current_image_idx,
+            ref_point=(cx, cy),
+        )
+        if contour is None:
+            return
         pit_id = self.next_pit_id
         self.next_pit_id += 1
         self.pits[self.current_image_idx][pit_id] = contour
@@ -544,11 +556,21 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             contour = self.pits[self.current_image_idx].get(pit_id)
             if contour is None:
                 continue
+            cx = float(np.mean(contour[:, 1]))
+            cy = float(np.mean(contour[:, 0]))
             new_contour = align_contour_to_gradient(contour, self.images[self.current_image_idx])
             if new_contour is None:
                 continue
             mask = mask_from_contour(new_contour, self.images[self.current_image_idx].shape)
             if mask.sum() < 20:
+                continue
+            new_contour = self._enforce_no_overlap(
+                new_contour,
+                self.current_image_idx,
+                exclude_id=pit_id,
+                ref_point=(cx, cy),
+            )
+            if new_contour is None:
                 continue
             self.pits[self.current_image_idx][pit_id] = new_contour
             profile = extract_pit_profile(new_contour, self.images[self.current_image_idx])
@@ -628,3 +650,114 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Placeholder - to be implemented or overridden as needed
     def calculate_corrosion_rates(self):  # pragma: no cover
         return []
+
+    # ------------------------------------------------------------------
+    # Refinement helpers
+    # ------------------------------------------------------------------
+    def _fit_mask_to_pit(self, mask: np.ndarray) -> Optional[np.ndarray]:
+        if mask is None or not np.any(mask):
+            return None
+        mask = np.asarray(mask, dtype=bool)
+        coords = np.column_stack(np.where(mask))
+        if coords.size == 0:
+            return None
+        cy, cx = coords.mean(axis=0)
+        shape = self.images[self.current_image_idx].shape
+
+        # Try running the standard detector using the lasso center to find a
+        # pit that completely contains the drawn region.
+        contour = self.detect_pit_edge(self.images[self.current_image_idx], (cx, cy), method=0)
+        if contour is not None:
+            det_mask = mask_from_contour(contour, shape).astype(bool)
+            if np.all(mask <= det_mask):
+                return contour
+
+        contour = mask_to_closed_contour(mask.astype(np.uint8))
+        if contour is None:
+            return None
+
+        refined = align_contour_to_gradient(
+            contour,
+            self.images[self.current_image_idx],
+            max_outward=max(shape) * 0.15,
+            inward=8.0,
+        )
+        if refined is None:
+            refined = contour
+        refined_mask = mask_from_contour(refined, shape).astype(bool)
+        if not np.all(mask <= refined_mask):
+            combined = refined_mask | mask
+            combined = morphology.binary_closing(combined, morphology.disk(2))
+            combined = binary_fill_holes(combined)
+            combined_contour = mask_to_closed_contour(combined.astype(np.uint8))
+            if combined_contour is not None:
+                refined = align_contour_to_gradient(
+                    combined_contour,
+                    self.images[self.current_image_idx],
+                    max_outward=max(shape) * 0.12,
+                    inward=6.0,
+                ) or combined_contour
+        if mask_from_contour(refined, shape).sum() < np.count_nonzero(mask) * 0.5:
+            return None
+        return refined
+
+    def _enforce_no_overlap(
+        self,
+        contour: np.ndarray,
+        frame_idx: int,
+        exclude_id: Optional[int] = None,
+        ref_point: Optional[tuple] = None,
+    ) -> Optional[np.ndarray]:
+        if frame_idx not in self.pits or not self.pits[frame_idx]:
+            return contour
+        shape = self.images[frame_idx].shape
+        new_mask = mask_from_contour(contour, shape).astype(bool)
+        existing_mask = np.zeros(shape, dtype=bool)
+        for pid, existing in self.pits[frame_idx].items():
+            if pid == exclude_id:
+                continue
+            existing_mask |= mask_from_contour(existing, shape).astype(bool)
+        overlap = new_mask & existing_mask
+        if not overlap.any():
+            return contour
+        print("Adjusting pit to avoid crossing existing pits.")
+        new_mask &= ~existing_mask
+        if not new_mask.any():
+            print("Pit discarded because it would cross existing pits.")
+            return None
+        labeled = measure.label(new_mask)
+        target_mask = labeled.astype(bool)
+        if ref_point is not None:
+            rx = int(round(ref_point[0]))
+            ry = int(round(ref_point[1]))
+            if 0 <= ry < labeled.shape[0] and 0 <= rx < labeled.shape[1]:
+                label_id = labeled[ry, rx]
+                if label_id == 0:
+                    print("Pit discarded because trimming removed its center.")
+                    return None
+                target_mask = labeled == label_id
+            else:
+                print("Pit discarded because trimming removed its center.")
+                return None
+        else:
+            # Keep the largest remaining component if no reference point is available.
+            props = measure.regionprops(labeled)
+            if not props:
+                print("Pit discarded because it would cross existing pits.")
+                return None
+            largest = max(props, key=lambda p: p.area)
+            target_mask = labeled == largest.label
+        target_mask = morphology.binary_opening(target_mask, morphology.disk(1))
+        target_mask = morphology.binary_closing(target_mask, morphology.disk(1))
+        if target_mask.sum() < 20:
+            print("Pit discarded because it would cross existing pits.")
+            return None
+        new_contour = mask_to_closed_contour(target_mask.astype(np.uint8))
+        if new_contour is None:
+            print("Pit discarded because it would cross existing pits.")
+            return None
+        if ref_point is not None:
+            if not self.point_in_contour(new_contour, ref_point[0], ref_point[1], shape):
+                print("Pit discarded because trimming removed its center.")
+                return None
+        return new_contour

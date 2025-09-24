@@ -23,13 +23,33 @@ from .utils import (
 class DetectionMixin:
     """Provides detection routines for :class:`SmartPitTracker`."""
 
-    roi_halves: Sequence[int] = (80, 120, 160, 220)
+    roi_halves: Sequence[int] = (80, 120, 160, 220, 280, 360, 460)
 
     def detect_pit_edge(self, image: np.ndarray, seed_point, method: int = 0):
         x, y = int(seed_point[0]), int(seed_point[1])
         method_order = ((method % 3), (method + 1) % 3, (method + 2) % 3)
 
-        for half in self.roi_halves:
+        h, w = image.shape
+        max_half = int(min(h, w) / 2) - 5
+        min_dim = min(h, w)
+        dynamic_halves = [int(round(min_dim * frac)) for frac in np.linspace(0.1, 0.48, 8)]
+        roi_candidates = []
+        for half in (*self.roi_halves, *dynamic_halves):
+            if half <= 0:
+                continue
+            roi_candidates.append(min(max_half, int(half)))
+        # Preserve ordering while removing duplicates and ensuring increasing size.
+        seen = set()
+        candidate_halves = []
+        for half in roi_candidates:
+            if half <= 20 or half in seen:
+                continue
+            seen.add(half)
+            candidate_halves.append(half)
+        if max_half not in seen and max_half > 20:
+            candidate_halves.append(max_half)
+
+        for half in candidate_halves:
             bounds = roi_bounds(x, y, half=half, shape=image.shape)
             roi = image[bounds.y0 : bounds.y1, bounds.x0 : bounds.x1]
 
@@ -43,8 +63,20 @@ class DetectionMixin:
 
                 if comp is None or not comp.any():
                     continue
-                if component_touches_edge(comp):
+                touches_edge = component_touches_edge(comp)
+                can_expand = (
+                    bounds.x0 > 0
+                    and bounds.x1 < image.shape[1]
+                    and bounds.y0 > 0
+                    and bounds.y1 < image.shape[0]
+                    and half < candidate_halves[-1]
+                )
+                if touches_edge and can_expand:
                     continue
+                if touches_edge and not can_expand:
+                    comp = morphology.binary_erosion(comp, morphology.disk(1))
+                    if comp is None or not comp.any():
+                        continue
 
                 contour_roi = mask_to_closed_contour(comp)
                 if contour_roi is None:
@@ -75,8 +107,11 @@ class DetectionMixin:
             threshold = seed_value + 0.12 * (roi.max() - seed_value)
 
         pit_mask = (roi < threshold).astype(np.uint8)
-        pit_mask = morphology.binary_opening(pit_mask, morphology.disk(2))
-        pit_mask = morphology.binary_closing(pit_mask, morphology.disk(3))
+        scale = max(1, int(round(max(roi.shape) / 90)))
+        open_r = max(1, scale)
+        close_r = max(open_r + 1, int(round(max(roi.shape) / 60)))
+        pit_mask = morphology.binary_opening(pit_mask, morphology.disk(open_r))
+        pit_mask = morphology.binary_closing(pit_mask, morphology.disk(close_r))
 
         labeled = measure.label(pit_mask)
         lbl = labeled[y, x] if 0 <= y < labeled.shape[0] and 0 <= x < labeled.shape[1] else 0
@@ -145,7 +180,9 @@ class DetectionMixin:
             ref_stats["edge_height"]["mean"] - ref_stats["pit_bottom"]["mean"]
         ) * 0.5
         pit_mask = (image < threshold).astype(np.uint8)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel_radius = max(2, int(round(min(image.shape) / 140)))
+        ksize = kernel_radius * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
         pit_mask = cv2.morphologyEx(pit_mask, cv2.MORPH_CLOSE, kernel)
         pit_mask = cv2.morphologyEx(pit_mask, cv2.MORPH_OPEN, kernel)
         labeled = measure.label(pit_mask)
