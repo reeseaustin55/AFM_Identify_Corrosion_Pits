@@ -15,6 +15,7 @@ from skimage.segmentation import (
     inverse_gaussian_gradient,
 )
 
+from .alignment import align_contour_to_gradient
 from .profile import extract_pit_profile
 from .utils import (
     component_touches_edge,
@@ -90,7 +91,7 @@ class DetectionMixin:
                 contour[:, 1] += bounds.x0
                 contour[:, 0] += bounds.y0
 
-                contour = self._refine_large_contour(contour, image)
+                contour = self._polish_contour(contour, image)
                 if contour is None:
                     continue
 
@@ -276,6 +277,72 @@ class DetectionMixin:
         return self.contains(*args, **kwargs)
 
     # --- Large pit refinement helpers ---------------------------------------
+    def _polish_contour(self, contour: np.ndarray, image: np.ndarray, keep_mask=None):
+        if contour is None or len(contour) < 3:
+            return None
+
+        contour = np.asarray(contour, dtype=np.float32)
+        h, w = image.shape
+        shape = (h, w)
+
+        keep_mask_bool = None
+        if keep_mask is not None:
+            keep_mask_bool = np.asarray(keep_mask, dtype=bool)
+            if keep_mask_bool.shape != shape:
+                raise ValueError("keep_mask must match the image shape")
+            if not keep_mask_bool.any():
+                keep_mask_bool = None
+
+        span_y = float(np.ptp(contour[:, 0])) if len(contour) else 0.0
+        span_x = float(np.ptp(contour[:, 1])) if len(contour) else 0.0
+        span = max(span_x, span_y, 1.0)
+
+        outward = max(max(shape) * 0.18, span * 0.55)
+        inward = max(6.0, span * 0.25)
+        smooth_sigma = 1.2 if span < 90 else 1.8
+
+        refined = align_contour_to_gradient(
+            contour,
+            image,
+            max_outward=outward,
+            inward=inward,
+            smooth_sigma=smooth_sigma,
+        )
+        if refined is None:
+            refined = contour
+
+        refined_mask = mask_from_contour(refined, shape).astype(bool)
+
+        if keep_mask_bool is not None and not np.all(keep_mask_bool <= refined_mask):
+            buffer_r = max(2, int(round(span / 35)))
+            union = np.logical_or(refined_mask, keep_mask_bool)
+            union = morphology.binary_closing(union, morphology.disk(buffer_r))
+            union = binary_fill_holes(union)
+            union = morphology.binary_opening(union, morphology.disk(max(1, buffer_r // 2)))
+            fallback = mask_to_closed_contour(union.astype(np.uint8))
+            if fallback is not None and len(fallback) >= 3:
+                refined = fallback
+                refined_mask = mask_from_contour(refined, shape).astype(bool)
+
+        large_refined = self._refine_large_contour(refined, image)
+        if large_refined is not None and len(large_refined) >= 3:
+            refined = large_refined
+            refined_mask = mask_from_contour(refined, shape).astype(bool)
+            if keep_mask_bool is not None and not np.all(keep_mask_bool <= refined_mask):
+                union = binary_fill_holes(refined_mask | keep_mask_bool)
+                fallback = mask_to_closed_contour(union.astype(np.uint8))
+                if fallback is not None and len(fallback) >= 3:
+                    refined = fallback
+                    refined_mask = mask_from_contour(refined, shape).astype(bool)
+
+        if keep_mask_bool is not None:
+            keep_area = int(keep_mask_bool.sum())
+            final_area = int(refined_mask.sum())
+            if final_area < max(keep_area * 0.75, keep_area - 40):
+                return None
+
+        return refined
+
     def _refine_large_contour(self, contour: np.ndarray, image: np.ndarray):
         if contour is None or len(contour) < 3:
             return contour
@@ -333,20 +400,55 @@ class DetectionMixin:
             return None
         roi_norm = (roi_img - roi_min) / (roi_ptp + 1e-6)
 
-        gimage = inverse_gaussian_gradient(roi_norm, alpha=70, sigma=2)
-        dilate_r = max(2, int(round(max(roi_mask.shape) / 120)))
-        init_ls = morphology.binary_dilation(roi_mask, morphology.disk(dilate_r))
+        scale = max(roi_norm.shape)
+        down_factor = max(1, int(np.ceil(scale / 380)))
+        if down_factor > 1:
+            small_size = (
+                max(1, roi_norm.shape[1] // down_factor),
+                max(1, roi_norm.shape[0] // down_factor),
+            )
+            roi_norm_small = cv2.resize(roi_norm, small_size, interpolation=cv2.INTER_AREA)
+            roi_mask_small = cv2.resize(
+                roi_mask.astype(np.uint8),
+                small_size,
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        else:
+            roi_norm_small = roi_norm
+            roi_mask_small = roi_mask
+
+        alpha = float(np.clip(45 + scale * 0.35, 60, 170))
+        sigma = float(np.clip(scale / 220, 0.8, 4.0))
+        iterations = int(np.clip(scale * 1.1, 180, 520))
+        smoothing = 3 if scale < 240 else 5
+        balloon = 1
+
+        gimage = inverse_gaussian_gradient(roi_norm_small, alpha=alpha, sigma=sigma)
+        dilate_r = max(2, int(round(max(roi_mask_small.shape) / 90)))
+        init_ls = morphology.binary_dilation(roi_mask_small, morphology.disk(dilate_r))
         mgac = morphological_geodesic_active_contour(
             gimage,
-            220,
+            iterations,
             init_level_set=init_ls,
-            smoothing=3,
-            balloon=1,
+            smoothing=smoothing,
+            balloon=balloon,
         )
         mgac = mgac.astype(bool)
-        mgac = morphology.binary_closing(mgac, morphology.disk(2))
+        if down_factor > 1:
+            mgac = cv2.resize(
+                mgac.astype(np.uint8),
+                (roi_mask.shape[1], roi_mask.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        close_r = max(2, int(round(scale / 120)))
+        open_r = max(1, int(round(scale / 220)))
+        mgac = morphology.binary_closing(mgac, morphology.disk(close_r))
         mgac = binary_fill_holes(mgac)
-        mgac = morphology.remove_small_objects(mgac, min_size=max(32, int(0.01 * roi_mask.sum())))
+        mgac = morphology.binary_opening(mgac, morphology.disk(open_r))
+        mgac = morphology.remove_small_objects(
+            mgac,
+            min_size=max(32, int(0.01 * roi_mask.sum())),
+        )
         if not np.any(mgac):
             return None
         if not np.all(roi_mask <= mgac):

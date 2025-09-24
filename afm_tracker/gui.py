@@ -16,7 +16,6 @@ from matplotlib.widgets import Button, LassoSelector
 from scipy.ndimage import binary_fill_holes
 from skimage import measure, morphology
 
-from .alignment import align_contour_to_gradient
 from .detection import DetectionMixin
 from .loader import load_image_series
 from .profile import extract_pit_profile
@@ -143,6 +142,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
 
         # Buttons row 3 (advanced tools)
         ax_align = plt.axes([0.06, 0.06, 0.12, 0.05])
+        ax_select_all = plt.axes([0.19, 0.06, 0.12, 0.05])
 
         self.btn_add = Button(ax_add, "Add Mode")
         self.btn_refit = Button(ax_refit, "Refit+")
@@ -159,6 +159,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.btn_circle = Button(ax_circle, "Circle ROI")
         self.btn_manual = Button(ax_manual, "Manual Trace")
         self.btn_align = Button(ax_align, "Align Edge")
+        self.btn_select_all = Button(ax_select_all, "Select All")
 
         self.btn_add.on_clicked(self.toggle_add_mode)
         self.btn_refit.on_clicked(self.refit_selected_robust)
@@ -174,6 +175,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.btn_circle.on_clicked(self.activate_circle)
         self.btn_manual.on_clicked(self.activate_manual)
         self.btn_align.on_clicked(self.align_selected_edges)
+        self.btn_select_all.on_clicked(self.select_all_pits)
 
         self.display_current_image()
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
@@ -497,6 +499,16 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         print("Selection cleared")
         self.display_current_image()
 
+    def select_all_pits(self, _event=None):
+        frame_pits = self.pits.get(self.current_image_idx, {})
+        if not frame_pits:
+            self.selected_pit_ids = []
+            print("No pits to select.")
+        else:
+            self.selected_pit_ids = list(frame_pits.keys())
+            print(f"Selected all {len(self.selected_pit_ids)} pits")
+        self.display_current_image()
+
     def auto_detect_similar(self, _event=None):
         frame_pits = self.pits.get(self.current_image_idx, {})
         if not frame_pits:
@@ -558,7 +570,12 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                 continue
             cx = float(np.mean(contour[:, 1]))
             cy = float(np.mean(contour[:, 0]))
-            new_contour = align_contour_to_gradient(contour, self.images[self.current_image_idx])
+            base_mask = mask_from_contour(contour, self.images[self.current_image_idx].shape)
+            new_contour = self._polish_contour(
+                contour,
+                self.images[self.current_image_idx],
+                keep_mask=base_mask,
+            )
             if new_contour is None:
                 continue
             mask = mask_from_contour(new_contour, self.images[self.current_image_idx].shape)
@@ -657,54 +674,65 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     def _fit_mask_to_pit(self, mask: np.ndarray) -> Optional[np.ndarray]:
         if mask is None or not np.any(mask):
             return None
+
+        image = self.images[self.current_image_idx]
+        shape = image.shape
         mask = np.asarray(mask, dtype=bool)
+        mask = morphology.binary_closing(mask, morphology.disk(2))
+        mask = morphology.binary_opening(mask, morphology.disk(1))
+        mask = binary_fill_holes(mask)
+        mask = morphology.remove_small_holes(mask, area_threshold=64)
+        if mask.sum() < 40:
+            return None
+
         coords = np.column_stack(np.where(mask))
         if coords.size == 0:
             return None
         cy, cx = coords.mean(axis=0)
-        shape = self.images[self.current_image_idx].shape
 
-        # Try running the standard detector using the lasso center to find a
-        # pit that completely contains the drawn region.
-        contour = self.detect_pit_edge(self.images[self.current_image_idx], (cx, cy), method=0)
-        if contour is not None:
-            det_mask = mask_from_contour(contour, shape).astype(bool)
-            if np.all(mask <= det_mask):
-                return contour
+        seeds = []
+        center_seed = (float(cx), float(cy))
+        seeds.append(center_seed)
 
-        contour = mask_to_closed_contour(mask.astype(np.uint8))
-        if contour is None:
+        masked_values = image[mask]
+        if masked_values.size:
+            min_idx = int(np.argmin(masked_values))
+            min_y, min_x = coords[min_idx]
+            seeds.append((float(min_x), float(min_y)))
+
+        bbox_y0, bbox_x0 = coords.min(axis=0)
+        bbox_y1, bbox_x1 = coords.max(axis=0)
+        seeds.append((float((bbox_x0 + bbox_x1) / 2.0), float((bbox_y0 + bbox_y1) / 2.0)))
+
+        seen = set()
+        for sx, sy in seeds:
+            ix = int(round(sx))
+            iy = int(round(sy))
+            if not (0 <= ix < shape[1] and 0 <= iy < shape[0]):
+                continue
+            key = (ix, iy)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not mask[iy, ix]:
+                continue
+            contour = self.detect_pit_edge(image, (sx, sy), method=0)
+            if contour is None:
+                continue
+            refined = self._polish_contour(contour, image, keep_mask=mask)
+            if refined is None:
+                continue
+            refined_mask = mask_from_contour(refined, shape).astype(bool)
+            if np.all(mask <= refined_mask):
+                return refined
+
+        raw_contour = mask_to_closed_contour(mask.astype(np.uint8))
+        if raw_contour is None:
             return None
 
-        refined = align_contour_to_gradient(
-            contour,
-            self.images[self.current_image_idx],
-            max_outward=max(shape) * 0.15,
-            inward=8.0,
-        )
+        refined = self._polish_contour(raw_contour, image, keep_mask=mask)
         if refined is None:
-            refined = contour
-        refined_mask = mask_from_contour(refined, shape).astype(bool)
-        if not np.all(mask <= refined_mask):
-            combined = refined_mask | mask
-            combined = morphology.binary_closing(combined, morphology.disk(2))
-            combined = binary_fill_holes(combined)
-            combined_contour = mask_to_closed_contour(combined.astype(np.uint8))
-            if combined_contour is not None:
-                combined_refined = align_contour_to_gradient(
-                    combined_contour,
-                    self.images[self.current_image_idx],
-                    max_outward=max(shape) * 0.12,
-                    inward=6.0,
-                )
-                refined = combined_refined if combined_refined is not None else combined_contour
-        large_refine = self._refine_large_contour(refined, self.images[self.current_image_idx])
-        if large_refine is not None:
-            refined = large_refine
-
-        refined_mask = mask_from_contour(refined, shape).astype(bool)
-        if refined_mask.sum() < np.count_nonzero(mask) * 0.5:
-            return None
+            refined = raw_contour
         return refined
 
     def _enforce_no_overlap(
