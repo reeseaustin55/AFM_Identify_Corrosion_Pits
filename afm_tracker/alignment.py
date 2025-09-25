@@ -39,6 +39,7 @@ def align_contour_to_gradient(
     inward: float = 2.0,
     smooth_sigma: float = 1.5,
     distance_penalty: float = 0.4,
+    curvature_weight: float = 0.0,
 ) -> Optional[np.ndarray]:
     """Align ``contour`` with the strongest gradient along radial search rays."""
     if contour is None or len(contour) < 3:
@@ -50,6 +51,8 @@ def align_contour_to_gradient(
     search_distances = np.linspace(-inward, max_outward, 36)
     h, w = image.shape
     new_points = []
+
+    curvature_weight = max(0.0, float(curvature_weight))
 
     for (y, x) in contour:
         direction = np.array([y - centroid[0], x - centroid[1]], dtype=np.float32)
@@ -128,6 +131,12 @@ def align_contour_to_gradient(
             new_points.append([best[1], best[2]])
 
     new_contour = np.array(new_points, dtype=np.float32)
+    if curvature_weight > 0.0 and len(new_contour) >= 3:
+        prev_pts = np.roll(new_contour, 1, axis=0)
+        next_pts = np.roll(new_contour, -1, axis=0)
+        laplacian = prev_pts + next_pts - 2.0 * new_contour
+        new_contour = new_contour + curvature_weight * laplacian
+
     if smooth_sigma > 0:
         ys = gaussian_filter1d(new_contour[:, 0], sigma=smooth_sigma, mode="wrap")
         xs = gaussian_filter1d(new_contour[:, 1], sigma=smooth_sigma, mode="wrap")

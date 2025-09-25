@@ -106,6 +106,9 @@ class DetectionMixin:
     def _current_blur_sigma(self) -> float:
         return float(max(0.0, getattr(self, "detection_blur_sigma", 1.6)))
 
+    def _current_curvature_weight(self) -> float:
+        return float(max(0.0, getattr(self, "curvature_weight", 0.0)))
+
     def _post_process_contour(self, contour, image, seed_point):
         """Refine ``contour`` to better follow edges while keeping the seed inside."""
 
@@ -133,6 +136,7 @@ class DetectionMixin:
             inward=4.0,
             smooth_sigma=1.0,
             distance_penalty=0.6,
+            curvature_weight=self._current_curvature_weight(),
         )
         if aligned is not None and len(aligned) >= 3:
             if point_in_contour(aligned, seed_point[0], seed_point[1], image.shape):
@@ -438,7 +442,12 @@ class DetectionMixin:
             contour = mask_to_closed_contour(comp_mask.astype(np.uint8))
             if contour is None or len(contour) < 3:
                 continue
-            aligned = align_contour_to_gradient(contour, image, smooth_sigma=0.8)
+            aligned = align_contour_to_gradient(
+                contour,
+                image,
+                smooth_sigma=0.8,
+                curvature_weight=self._current_curvature_weight(),
+            )
             if aligned is not None and len(aligned) >= 3:
                 contour = aligned
             entries.append((score, contour))

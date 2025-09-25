@@ -96,6 +96,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.large_pit_mode = False
         self.detection_blur_sigma = 1.6
         self.pinch_distance_px = 3.0
+        self.curvature_weight = 0.0
 
     # ------------------------------------------------------------------
     # Basic geometry helpers (wrappers around utils)
@@ -147,8 +148,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         ax_large_mode = plt.axes([0.34, 0.18, 0.20, 0.05])
 
         # Sliders row
-        ax_sigma = plt.axes([0.06, 0.10, 0.32, 0.035])
-        ax_pinch = plt.axes([0.42, 0.10, 0.32, 0.035])
+        ax_sigma = plt.axes([0.06, 0.10, 0.26, 0.035])
+        ax_pinch = plt.axes([0.34, 0.10, 0.26, 0.035])
+        ax_curvature = plt.axes([0.62, 0.10, 0.26, 0.035])
 
         ax_execute = plt.axes([0.06, 0.02, 0.88, 0.06])
 
@@ -189,6 +191,14 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             valinit=getattr(self, "pinch_distance_px", 3.0),
             valstep=0.5,
         )
+        self.curvature_slider = Slider(
+            ax_curvature,
+            "Curv λ",
+            valmin=0.0,
+            valmax=1.0,
+            valinit=getattr(self, "curvature_weight", 0.0),
+            valstep=0.05,
+        )
 
         self.btn_add.on_clicked(self.toggle_add_mode)
         self.btn_refit.on_clicked(self.refit_selected_robust)
@@ -207,6 +217,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.btn_execute.on_clicked(self.execute_analysis)
         self.blur_slider.on_changed(self._on_blur_sigma_change)
         self.pinch_slider.on_changed(self._on_pinch_radius_change)
+        self.curvature_slider.on_changed(self._on_curvature_weight_change)
 
         self.display_current_image()
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
@@ -438,6 +449,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     def _on_pinch_radius_change(self, value):
         self.pinch_distance_px = max(0.0, float(value))
 
+    def _on_curvature_weight_change(self, value):
+        self.curvature_weight = max(0.0, float(value))
+
     # ------------------------------------------------------------------
     # Pit management helpers
     # ------------------------------------------------------------------
@@ -614,7 +628,11 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         if best is None:
             best = contour
 
-        aligned = align_contour_to_gradient(best, image)
+        aligned = align_contour_to_gradient(
+            best,
+            image,
+            curvature_weight=self._current_curvature_weight(),
+        )
         if aligned is not None:
             aligned_mask = mask_from_contour(aligned, image.shape)
             if aligned_mask.sum() > 0:
@@ -813,7 +831,11 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             contour = self.pits[self.current_image_idx].get(pit_id)
             if contour is None:
                 continue
-            new_contour = align_contour_to_gradient(contour, image)
+            new_contour = align_contour_to_gradient(
+                contour,
+                image,
+                curvature_weight=self._current_curvature_weight(),
+            )
             if new_contour is None:
                 continue
             pinch_masks = self._pinch_components(
