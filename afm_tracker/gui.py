@@ -916,11 +916,19 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
 
         if not detail_df.empty or not summary_df.empty:
             excel_path = output_dir / "corrosion_rates.xlsx"
-            with pd.ExcelWriter(excel_path) as writer:
-                if not detail_df.empty:
-                    detail_df.to_excel(writer, sheet_name="details", index=False)
-                if not summary_df.empty:
-                    summary_df.to_excel(writer, sheet_name="summary", index=False)
+            try:
+                with pd.ExcelWriter(excel_path) as writer:
+                    if not detail_df.empty:
+                        detail_df.to_excel(writer, sheet_name="details", index=False)
+                    if not summary_df.empty:
+                        summary_df.to_excel(writer, sheet_name="summary", index=False)
+            except ModuleNotFoundError as exc:
+                missing_package = exc.name or "openpyxl"
+                print(
+                    "Unable to export Excel workbook because the '{}' package is missing. "
+                    "Install it with 'pip install {}' to enable Excel exports."
+                    .format(missing_package, missing_package)
+                )
 
         if not detail_df.empty:
             print(f"Saved corrosion rates for {len(detail_df)} pit transitions.")
