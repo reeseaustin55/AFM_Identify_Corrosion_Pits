@@ -17,7 +17,7 @@ from skimage import morphology
 
 from .alignment import align_contour_to_gradient
 from .detection import DetectionMixin
-from .loader import load_image_series
+from .loader import find_ibw_sidecar, load_image_series
 from .profile import extract_pit_profile
 from .tracking import TrackingMixin
 from .utils import (
@@ -964,9 +964,15 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         if not self.image_files or idx >= len(self.image_files):
             return self.timestamps[idx] if idx < len(self.timestamps) else None
         png_path = self.image_files[idx]
-        ibw_path = png_path.with_suffix(".ibw")
-        if ibw_path.exists():
-            return datetime.fromtimestamp(ibw_path.stat().st_mtime)
+        ibw_path = find_ibw_sidecar(png_path)
+        if ibw_path is not None:
+            stat = ibw_path.stat()
+            timestamp = getattr(stat, "st_mtime_ns", None)
+            if timestamp is not None:
+                timestamp /= 1e9
+            else:
+                timestamp = stat.st_mtime
+            return datetime.fromtimestamp(timestamp)
         if idx < len(self.timestamps):
             return self.timestamps[idx]
         return None

@@ -4,9 +4,32 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
+
+
+def find_ibw_sidecar(png_path: Path) -> Optional[Path]:
+    """Return the IBW file that shares a stem with ``png_path``.
+
+    Some export pipelines flip the case of the extension when copying files
+    between systems, so we perform a case-insensitive search that still prefers
+    the straightforward ``.ibw`` match when available.
+    """
+
+    primary = png_path.with_suffix(".ibw")
+    if primary.exists():
+        return primary
+
+    alt = png_path.with_suffix(".IBW")
+    if alt.exists():
+        return alt
+
+    stem = png_path.stem
+    for sibling in png_path.parent.iterdir():
+        if sibling.stem == stem and sibling.suffix.lower() == ".ibw":
+            return sibling
+    return None
 
 
 def load_image_series(image_folder: Path):
@@ -41,14 +64,15 @@ def load_image_series(image_folder: Path):
             image_files.append(png_file)
 
             # Prefer the timestamp from the paired IBW metadata file, if available.
-            ibw_path = png_file.with_suffix(".ibw")
-            if not ibw_path.exists():
-                # Some instruments export upper-case extensions; check for them too.
-                upper_ibw = png_file.with_suffix(".IBW")
-                ibw_path = upper_ibw if upper_ibw.exists() else ibw_path
+            ibw_path = find_ibw_sidecar(png_file)
 
-            if ibw_path.exists():
-                timestamp = ibw_path.stat().st_mtime
+            if ibw_path is not None:
+                stat = ibw_path.stat()
+                timestamp = getattr(stat, "st_mtime_ns", None)
+                if timestamp is not None:
+                    timestamp /= 1e9
+                else:
+                    timestamp = stat.st_mtime
             else:
                 timestamp = os.path.getmtime(png_file)
 
