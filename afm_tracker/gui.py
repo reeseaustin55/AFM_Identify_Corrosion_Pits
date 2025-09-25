@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.path import Path as MplPath
-from matplotlib.widgets import Button, LassoSelector
+from matplotlib.widgets import Button, LassoSelector, Slider
 from skimage import morphology
 
 from .alignment import align_contour_to_gradient
@@ -94,6 +94,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.trace_method = 0
         self.state = InteractiveState(manual_pts=[])
         self.large_pit_mode = False
+        self.detection_blur_sigma = 1.6
 
     # ------------------------------------------------------------------
     # Basic geometry helpers (wrappers around utils)
@@ -122,7 +123,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         plt.ion()
         self.fig = plt.figure(figsize=(15, 10))
         self.ax = self.fig.add_subplot(111)
-        self.fig.subplots_adjust(bottom=0.32)
+        self.fig.subplots_adjust(bottom=0.38)
 
         # Buttons row 1
         ax_add = plt.axes([0.06, 0.22, 0.10, 0.05])
@@ -142,9 +143,10 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         ax_manual = plt.axes([0.74, 0.14, 0.12, 0.05])
 
         # Buttons row 3 (advanced tools)
-        ax_align = plt.axes([0.06, 0.06, 0.12, 0.05])
-        ax_select_all = plt.axes([0.19, 0.06, 0.12, 0.05])
-        ax_large_mode = plt.axes([0.32, 0.06, 0.18, 0.05])
+        ax_align = plt.axes([0.06, 0.08, 0.12, 0.05])
+        ax_select_all = plt.axes([0.19, 0.08, 0.12, 0.05])
+        ax_large_mode = plt.axes([0.32, 0.08, 0.18, 0.05])
+        ax_sigma = plt.axes([0.55, 0.02, 0.35, 0.03])
 
         self.btn_add = Button(ax_add, "Add Mode")
         self.btn_refit = Button(ax_refit, "Refit+")
@@ -163,6 +165,14 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.btn_align = Button(ax_align, "Align Edge")
         self.btn_select_all = Button(ax_select_all, "Select All")
         self.btn_large_mode = Button(ax_large_mode, "Large Fit: Off")
+        self.blur_slider = Slider(
+            ax_sigma,
+            "Blur σ",
+            valmin=0.0,
+            valmax=5.0,
+            valinit=getattr(self, "detection_blur_sigma", 1.6),
+            valstep=0.1,
+        )
 
         self.btn_add.on_clicked(self.toggle_add_mode)
         self.btn_refit.on_clicked(self.refit_selected_robust)
@@ -180,6 +190,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.btn_align.on_clicked(self.align_selected_edges)
         self.btn_select_all.on_clicked(self.select_all_pits)
         self.btn_large_mode.on_clicked(self.toggle_large_fit_mode)
+        self.blur_slider.on_changed(self._on_blur_sigma_change)
 
         self.display_current_image()
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
@@ -374,22 +385,21 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             print("Manual trace too short")
             self.state.manual_pts = []
             return
-        verts = np.array(self.state.manual_pts + [self.state.manual_pts[0]])
-        path = MplPath(verts)
-        img = self.images[self.current_image_idx]
-        ny, nx = img.shape
-        ygrid, xgrid = np.mgrid[0:ny, 0:nx]
-        pts = np.vstack((xgrid.ravel(), ygrid.ravel())).T
-        mask = path.contains_points(pts).reshape((ny, nx))
-        mask = morphology.binary_closing(mask, morphology.disk(2))
-        contour = self._fit_drawn_mask(mask)
-        if contour is None:
-            print("Manual trace failed to fit a pit")
+        pts = np.array(self.state.manual_pts, dtype=float)
+        if pts.ndim != 2 or pts.shape[0] < 3:
+            print("Manual trace failed to capture a region")
+            self.state.manual_pts = []
             return
+
+        contour = np.array([[p[1], p[0]] for p in pts], dtype=np.float32)
+        contour = np.vstack([contour, contour[:1]])
         self._add_contour_as_pit(contour)
         self._deactivate_tools()
         self.mode = "select"
         self.display_current_image()
+
+    def _on_blur_sigma_change(self, value):
+        self.detection_blur_sigma = max(0.0, float(value))
 
     # ------------------------------------------------------------------
     # Pit management helpers

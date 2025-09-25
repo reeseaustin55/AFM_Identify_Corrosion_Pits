@@ -103,6 +103,9 @@ class DetectionMixin:
                     return refined if refined is not None else contour
         return None
 
+    def _current_blur_sigma(self) -> float:
+        return float(max(0.0, getattr(self, "detection_blur_sigma", 1.6)))
+
     def _post_process_contour(self, contour, image, seed_point):
         """Refine ``contour`` to better follow edges while keeping the seed inside."""
 
@@ -190,7 +193,11 @@ class DetectionMixin:
         n_points, radius = 80, 20
         theta = np.linspace(0, 2 * np.pi, n_points)
         ic = np.column_stack([y + radius * np.sin(theta), x + radius * np.cos(theta)])
-        sm = gaussian(roi, 2, preserve_range=True)
+        sigma = self._current_blur_sigma()
+        if sigma > 0:
+            sm = gaussian(roi, sigma, preserve_range=True)
+        else:
+            sm = roi
         gx = cv2.Sobel(sm.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(sm.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
         edge = np.sqrt(gx * gx + gy * gy)
@@ -217,7 +224,11 @@ class DetectionMixin:
             return None
 
         roi_float = roi.astype(np.float32)
-        blur = cv2.GaussianBlur(roi_float, (0, 0), sigmaX=1.6, sigmaY=1.6)
+        sigma = self._current_blur_sigma()
+        if sigma > 0:
+            blur = cv2.GaussianBlur(roi_float, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        else:
+            blur = roi_float
         norm = cv2.normalize(blur, None, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
         if not np.isfinite(norm).all():
             norm = blur
@@ -296,7 +307,9 @@ class DetectionMixin:
 
         submask = mask[y0:y1, x0:x1]
         subimg = image[y0:y1, x0:x1].astype(np.float32)
-        subimg = cv2.GaussianBlur(subimg, (0, 0), sigmaX=1.2, sigmaY=1.2)
+        sigma = self._current_blur_sigma()
+        if sigma > 0:
+            subimg = cv2.GaussianBlur(subimg, (0, 0), sigmaX=sigma, sigmaY=sigma)
 
         seed_local = (seed_y - y0, seed_x - x0)
         if not (0 <= seed_local[0] < submask.shape[0] and 0 <= seed_local[1] < submask.shape[1]):
