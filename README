@@ -32,3 +32,22 @@ You will be prompted to select a directory containing grayscale PNG AFM images. 
 ## Requirements
 
 The scripts rely on NumPy, OpenCV, Matplotlib, scikit-image, SciPy, and pandas.
+
+## Batch pit growth analysis
+
+For automated, non-interactive processing of AFM pit growth across an image sequence use:
+
+```bash
+python analyze_pit_growth.py /path/to/afm/pngs \
+    --min-area-nm2 5e4 \
+    --max-match-distance 35
+```
+
+The script detects corrosion pits in each frame, tracks them over time, and writes:
+
+- `pit_growth_outputs/pit_observations.csv`: per-frame pit measurements (area, depth, centroid, etc.).
+- `pit_growth_outputs/pit_growth_summary.csv`: per-pit growth statistics including corrosion metrics.
+- `pit_growth_outputs/pit_growth_summary.xlsx`: Excel workbook duplicating the corrosion summary with pit perimeters (nm), young pit areas (px), pixel-to-nm² conversion factor, and corrosion rates.
+- `pit_growth_outputs/frame_XXX_overlay.png`: visual overlays showing detected pits and their IDs for each frame.
+
+Use the `--min-area-nm2` flag when the image filenames encode a physical pixel scale (e.g., `250nm`). Otherwise the `--min-area-px` threshold is applied in pixel units.
