@@ -8,7 +8,7 @@ This project provides interactive tools for identifying and tracking corrosion p
 python main.py
 ```
 
-You will be prompted to select a directory containing grayscale PNG AFM images. Once loaded, the interactive viewer exposes a number of tools for curating pit contours.
+You will be prompted to select a directory containing grayscale PNG AFM images. Once loaded, the interactive viewer exposes a number of tools for curating pit contours and reviewing the automated tracking results.
 
 ## Key features
 
@@ -17,6 +17,7 @@ You will be prompted to select a directory containing grayscale PNG AFM images. 
 - Frame-to-frame tracking with drift correction.
 - **Align Edge** tool to snap the selected pit boundary to the strongest nearby slope.
 - Export of annotated frames and optional corrosion rate summaries.
+- CSV and (optionally) Excel corrosion reports containing pit perimeters (nm), pit areas (px), conversion factors (px→nm²), and per-transition corrosion rates.
 
 ## Code structure
 
@@ -31,4 +32,23 @@ You will be prompted to select a directory containing grayscale PNG AFM images. 
 
 ## Requirements
 
-The scripts rely on NumPy, OpenCV, Matplotlib, scikit-image, SciPy, and pandas.
+The scripts rely on NumPy, OpenCV, Matplotlib, scikit-image, SciPy, and pandas. Install them with:
+
+```bash
+pip install numpy opencv-python matplotlib scikit-image scipy pandas
+```
+
+Excel export is optional; install `openpyxl` if you would like the analysis results written to an `.xlsx` workbook:
+
+```bash
+pip install openpyxl
+```
+
+## Analysis outputs
+
+After confirming pits and running the analysis, a timestamped folder named `pit_analysis_<timestamp>` is created within the image directory. The folder contains:
+
+- `frame_XXX.png` overlays for each annotated frame.
+- `corrosion_rates.csv` with a detailed per-transition table including pit perimeters (nm), young pit areas (pixels), the pixel-to-nm² conversion factor, corrosion (nm) and corrosion rates (nm/min).
+- `corrosion_rates.xlsx` with separate `details` and `summary` worksheets when `openpyxl` is installed.
+- `frame_links/` visualizations that illustrate the young/old pit pairings and drift compensation used during rate calculations.

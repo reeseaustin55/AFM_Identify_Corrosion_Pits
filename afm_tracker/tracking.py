@@ -18,6 +18,8 @@ class TrackingMixin:
     next_pit_id: int
 
     def correct_drift(self, from_idx: int, to_idx: int) -> Tuple[float, float]:
+        """Estimate the translation that best aligns ``from_idx`` with ``to_idx``."""
+
         if from_idx == to_idx:
             return (0.0, 0.0)
         A = self.images[from_idx].astype(np.float32)
@@ -49,6 +51,8 @@ class TrackingMixin:
             return (float(s[0]), float(s[1]))
 
     def track_pits_to_next_frame(self, from_idx: int, to_idx: int):
+        """Track pit contours from ``from_idx`` into ``to_idx`` using detection."""
+
         if from_idx not in self.pits or len(self.pits[from_idx]) == 0:
             return {}
         to_img = self.images[to_idx]

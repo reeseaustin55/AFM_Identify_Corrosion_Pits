@@ -12,6 +12,7 @@ from .utils import mask_from_contour, mask_to_closed_contour
 
 
 def _bilinear_interpolate(image: np.ndarray, y: float, x: float) -> float:
+    """Sample ``image`` at fractional coordinates using bilinear blending."""
     h, w = image.shape
     if y < 0 or x < 0 or y > h - 1 or x > w - 1:
         return 0.0

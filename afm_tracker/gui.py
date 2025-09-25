@@ -1,3 +1,5 @@
+"""Interactive Matplotlib GUI for tracking AFM corrosion pits."""
+
 from __future__ import annotations
 
 import warnings
@@ -35,6 +37,8 @@ import matplotlib.pyplot as plt
 
 @dataclass
 class InteractiveState:
+    """Mutable state container for the interactive drawing tools."""
+
     lasso: Optional[LassoSelector] = None
     circle_press: Optional[tuple] = None
     circle_artist: Optional[Line2D] = None
@@ -46,7 +50,11 @@ class InteractiveState:
 
 
 class SmartPitTracker(DetectionMixin, TrackingMixin):
+    """Matplotlib-based GUI for curating and analysing corrosion pits."""
+
     def __init__(self, image_folder: Optional[str] = None):
+        """Load image data and initialise GUI state."""
+
         if image_folder is None:
             try:
                 import tkinter as tk
@@ -102,18 +110,26 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Basic geometry helpers (wrappers around utils)
     # ------------------------------------------------------------------
     def iou(self, contour_a: np.ndarray, contour_b: np.ndarray, shape) -> float:
+        """Expose :func:`afm_tracker.utils.iou` for mixin interoperability."""
+
         return iou(contour_a, contour_b, shape)
 
     def contains(self, contour_big: np.ndarray, contour_small: np.ndarray, shape) -> bool:
+        """Expose :func:`afm_tracker.utils.contains` for mixin interoperability."""
+
         return contains(contour_big, contour_small, shape)
 
     def point_in_contour(self, contour: np.ndarray, x: float, y: float, shape) -> bool:
+        """Expose :func:`afm_tracker.utils.point_in_contour` for mixins."""
+
         return point_in_contour(contour, x, y, shape)
 
     # ------------------------------------------------------------------
     # GUI setup
     # ------------------------------------------------------------------
     def run_interactive_gui(self):
+        """Construct the Matplotlib interface and attach event handlers."""
+
         if not self.images:
             print("No images to display!")
             return
@@ -233,6 +249,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Display helpers
     # ------------------------------------------------------------------
     def display_current_image(self):
+        """Refresh the figure canvas for the current frame and overlays."""
+
         if self.ax is None:
             return
         self.ax.clear()
@@ -266,6 +284,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Mode toggles
     # ------------------------------------------------------------------
     def toggle_add_mode(self, _event=None):
+        """Toggle between selection mode and the click-to-add workflow."""
+
         self._deactivate_tools()
         if self.mode == "add":
             self.mode = "select"
@@ -278,6 +298,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def activate_lasso(self, _event=None):
+        """Activate the freehand lasso tool for drawing new pit candidates."""
+
         self._deactivate_tools()
         self.mode = "lasso"
         print("LASSO mode: draw freehand region")
@@ -285,6 +307,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def activate_circle(self, _event=None):
+        """Activate the circle drawing tool for quick radial seeds."""
+
         self._deactivate_tools()
         self.mode = "circle"
         print("CIRCLE mode: click-drag to draw circle")
@@ -293,6 +317,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.state.cid_release = self.fig.canvas.mpl_connect("button_release_event", self._on_circle_release)
 
     def activate_manual(self, _event=None):
+        """Enable manual tracing where the user draws the boundary directly."""
+
         self._deactivate_tools()
         self.mode = "manual"
         self.state.manual_active = False
@@ -303,6 +329,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.state.cid_release = self.fig.canvas.mpl_connect("button_release_event", self._on_manual_release)
 
     def _deactivate_tools(self):
+        """Disconnect temporary tool event bindings and clear overlays."""
+
         if self.state.lasso is not None:
             self.state.lasso.disconnect_events()
             self.state.lasso = None
@@ -321,6 +349,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Lasso logic
     # ------------------------------------------------------------------
     def _on_lasso_select(self, verts):
+        """Handle lasso completion by converting the path into contours."""
+
         img = self.images[self.current_image_idx]
         ny, nx = img.shape
         ygrid, xgrid = np.mgrid[0:ny, 0:nx]
@@ -353,11 +383,15 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Circle logic
     # ------------------------------------------------------------------
     def _on_circle_press(self, event):
+        """Record the anchor point of the circle drawing tool."""
+
         if event.inaxes != self.ax:
             return
         self.state.circle_press = (event.xdata, event.ydata)
 
     def _on_circle_motion(self, event):
+        """Render a live preview of the circle while the mouse moves."""
+
         if self.state.circle_press is None or event.inaxes != self.ax:
             return
         cx0, cy0 = self.state.circle_press
@@ -371,6 +405,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.fig.canvas.draw_idle()
 
     def _on_circle_release(self, event):
+        """Convert the circle ROI into contours once the mouse is released."""
+
         if self.state.circle_press is None or event.inaxes != self.ax:
             return
         cx0, cy0 = self.state.circle_press
@@ -399,12 +435,16 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Manual trace logic
     # ------------------------------------------------------------------
     def _on_manual_press(self, event):
+        """Begin capturing a freehand trace when the mouse is pressed."""
+
         if event.inaxes != self.ax:
             return
         self.state.manual_active = True
         self.state.manual_pts = [(event.xdata, event.ydata)]
 
     def _on_manual_motion(self, event):
+        """Append new vertices to the manual trace while the mouse moves."""
+
         if not self.state.manual_active or event.inaxes != self.ax:
             return
         self.state.manual_pts.append((event.xdata, event.ydata))
@@ -414,6 +454,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.fig.canvas.draw_idle()
 
     def _on_manual_release(self, event):
+        """Complete the manual trace and convert it into a pit operation."""
+
         if not self.state.manual_active or event.inaxes != self.ax:
             return
         self.state.manual_active = False
@@ -444,18 +486,26 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
         
     def _on_blur_sigma_change(self, value):
+        """Update the detection blur sigma from the slider widget."""
+
         self.detection_blur_sigma = max(0.0, float(value))
 
     def _on_pinch_radius_change(self, value):
+        """Update the pinch radius used when splitting neighbouring pits."""
+
         self.pinch_distance_px = max(0.0, float(value))
 
     def _on_curvature_weight_change(self, value):
+        """Update the smoothness penalty for contour alignment."""
+
         self.curvature_weight = max(0.0, float(value))
 
     # ------------------------------------------------------------------
     # Pit management helpers
     # ------------------------------------------------------------------
     def _split_pit_with_trace(self, pts: np.ndarray) -> bool:
+        """Use a manual trace to divide a pit into multiple components."""
+
         if self.current_image_idx not in self.pits or not self.pits[self.current_image_idx]:
             print("Manual trace: no pits available to split.")
             return False
@@ -531,6 +581,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         return False
 
     def _add_contour_as_pit(self, contour: np.ndarray):
+        """Register ``contour`` as a pit in the current frame if it is valid."""
+
         if self.current_image_idx not in self.pits:
             self.pits[self.current_image_idx] = {}
         shape = self.images[self.current_image_idx].shape
@@ -664,6 +716,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         return filtered if filtered else candidate_contours
 
     def on_click(self, event):
+        """Handle Matplotlib click events according to the active mode."""
+
         if event.inaxes != self.ax:
             return
         x, y = event.xdata, event.ydata
@@ -700,6 +754,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # Higher level actions
     # ------------------------------------------------------------------
     def refit_selected_robust(self, _event=None):
+        """Re-run the detection pipeline for the currently selected pits."""
+
         if not self.selected_pit_ids:
             print("No pits selected for refitting")
             return
@@ -735,6 +791,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def delete_selected(self, _event=None):
+        """Remove the selected pits from the current frame."""
+
         if not self.selected_pit_ids:
             print("No pits selected for deletion")
             return
@@ -748,11 +806,15 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def clear_selection(self, _event=None):
+        """Deselect all pits in the current frame."""
+
         self.selected_pit_ids = []
         print("Selection cleared")
         self.display_current_image()
 
     def select_all_pits(self, _event=None):
+        """Select every pit in the current frame for batch operations."""
+
         frame_pits = self.pits.get(self.current_image_idx, {})
         if not frame_pits:
             self.selected_pit_ids = []
@@ -763,6 +825,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def toggle_large_fit_mode(self, _event=None):
+        """Toggle a detection mode tuned for very large pits."""
+
         self.large_pit_mode = not self.large_pit_mode
         if hasattr(self, "btn_large_mode"):
             self.btn_large_mode.label.set_text("Large Fit: On" if self.large_pit_mode else "Large Fit: Off")
@@ -771,6 +835,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def auto_detect_similar(self, _event=None):
+        """Add new pits that resemble the selected references."""
+
         frame_pits = self.pits.get(self.current_image_idx, {})
         if not frame_pits:
             print("Auto Similar: add a few manual/interactive pits first.")
@@ -818,6 +884,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def align_selected_edges(self, _event=None):
+        """Snap the selected contours to the closest image gradients."""
+
         if not self.selected_pit_ids:
             print("Align Edge: select at least one pit first.")
             return
@@ -865,6 +933,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             print("Align Edge: unable to improve selected pits.")
 
     def confirm_frame(self, _event=None):
+        """Acknowledge the current frame and clear the active selection."""
+
         if self.current_image_idx not in self.pits or not self.pits[self.current_image_idx]:
             print("No pits to confirm!")
             return
@@ -873,12 +943,16 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.display_current_image()
 
     def prev_frame(self, _event=None):
+        """Navigate to the previous frame without triggering tracking."""
+
         if self.current_image_idx > 0:
             self.current_image_idx -= 1
             self.selected_pit_ids = []
             self.display_current_image()
 
     def next_frame(self, _event=None):
+        """Advance to the next frame and auto-track when needed."""
+
         if self.current_image_idx < len(self.images) - 1:
             self.current_image_idx += 1
             self.selected_pit_ids = []
@@ -891,6 +965,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             self.display_current_image()
 
     def execute_analysis(self, _event=None):
+        """Export overlays and corrosion metrics for the curated pit tracks."""
+
         if not self._ensure_all_frames_tracked():
             return
 
@@ -952,6 +1028,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         print(f"Analysis artifacts saved to: {output_dir}")
 
     def _ensure_all_frames_tracked(self) -> bool:
+        """Ensure every frame has pit contours by running tracking as needed."""
+
         if 0 not in self.pits or not self.pits[0]:
             print("Please add pits on the first frame before running the analysis.")
             return False
@@ -964,6 +1042,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         return True
 
     def _export_overlay_images(self, output_dir: Path) -> None:
+        """Save PNG overlays showing pit contours for each annotated frame."""
+
         for frame_idx, image in enumerate(self.images):
             contours = self.pits.get(frame_idx, {})
             if not contours:
@@ -979,6 +1059,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             plt.close(fig)
 
     def _export_linkage_visualizations(self, output_dir: Path, linkage_rows: List[dict]) -> None:
+        """Generate diagnostic figures illustrating frame-to-frame linking."""
+
         if not linkage_rows:
             return
 
@@ -1108,12 +1190,16 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             plt.close(fig)
 
     def _contour_centroid(self, contour: np.ndarray) -> tuple[float, float]:
+        """Return the (x, y) centroid of the provided contour."""
+
         if contour is None or len(contour) == 0:
             return 0.0, 0.0
         contour = np.asarray(contour)
         return float(contour[:, 1].mean()), float(contour[:, 0].mean())
 
     def calculate_corrosion_rates(self):  # pragma: no cover
+        """Compute corrosion statistics across all tracked pit transitions."""
+
         if len(self.images) < 2:
             return {"details": [], "summary": [], "linkage": []}
 
@@ -1283,6 +1369,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         return {"details": details, "summary": summary, "linkage": linkage}
 
     def _shift_contour(self, contour: np.ndarray, dx: float, dy: float, shape) -> np.ndarray:
+        """Translate ``contour`` by ``(dx, dy)`` while clipping to ``shape``."""
+
         if contour is None or len(contour) == 0:
             return contour
         shifted = contour.astype(np.float32).copy()
@@ -1291,6 +1379,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         return shifted
 
     def _contour_perimeter(self, contour: np.ndarray) -> float:
+        """Approximate the contour perimeter using OpenCV arc length."""
+
         if contour is None or len(contour) < 3:
             return 0.0
         pts = np.array([(float(x), float(y)) for y, x in contour], dtype=np.float32)
@@ -1300,6 +1390,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     def _contour_near_edge(
         self, contour: np.ndarray, shape, margin_px: int = 50
     ) -> bool:
+        """Return ``True`` when ``contour`` lies within ``margin_px`` of any edge."""
+
         if contour is None or len(contour) == 0:
             return True
         contour = np.asarray(contour)
@@ -1314,6 +1406,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         )
 
     def _get_frame_timestamp(self, idx: int) -> Optional[datetime]:
+        """Return the timestamp for frame ``idx`` if available."""
+
         if not self.image_files or idx >= len(self.image_files):
             return self.timestamps[idx] if idx < len(self.timestamps) else None
         png_path = self.image_files[idx]
@@ -1331,6 +1425,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         return None
 
     def _frame_time_delta_minutes(self, young_idx: int, old_idx: int) -> float:
+        """Return the elapsed minutes between two frames."""
+
         old_ts = self._get_frame_timestamp(old_idx)
         young_ts = self._get_frame_timestamp(young_idx)
         if old_ts is None or young_ts is None:

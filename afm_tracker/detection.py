@@ -51,6 +51,7 @@ class DetectionMixin:
         return seen
 
     def detect_pit_edge(self, image: np.ndarray, seed_point, method: int = 0):
+        """Return a contour around ``seed_point`` using several detection schemes."""
         x, y = int(seed_point[0]), int(seed_point[1])
         base_methods = ((method % 3), (method + 1) % 3, (method + 2) % 3)
         method_order = list(base_methods)
@@ -104,13 +105,17 @@ class DetectionMixin:
         return None
 
     def _current_blur_sigma(self) -> float:
+        """Return the Gaussian blur used to denoise ROIs before detection."""
+
         return float(max(0.0, getattr(self, "detection_blur_sigma", 1.6)))
 
     def _current_curvature_weight(self) -> float:
+        """Return the smoothness weight for gradient alignment."""
+
         return float(max(0.0, getattr(self, "curvature_weight", 0.0)))
 
     def _post_process_contour(self, contour, image, seed_point):
-        """Refine ``contour`` to better follow edges while keeping the seed inside."""
+        """Refine ``contour`` so that it better follows strong pit boundaries."""
 
         if contour is None or len(contour) < 3:
             return contour
@@ -157,6 +162,7 @@ class DetectionMixin:
 
     # --- Component generation -------------------------------------------------
     def _height_threshold_component(self, roi: np.ndarray, x: int, y: int):
+        """Segment the pit by thresholding a smoothed height histogram."""
         seed_value = roi[y, x]
         hist, bins = np.histogram(roi, bins=64)
         smooth_hist = gaussian_filter1d(hist.astype(float), sigma=2)
@@ -185,6 +191,7 @@ class DetectionMixin:
         return comp
 
     def _watershed_component(self, roi: np.ndarray, x: int, y: int):
+        """Grow a component from ``(x, y)`` using a Sobel-driven watershed."""
         den = cv2.bilateralFilter(roi.astype(np.uint8), 9, 75, 75)
         gx = cv2.Sobel(den, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(den, cv2.CV_32F, 0, 1, ksize=3)
@@ -363,6 +370,8 @@ class DetectionMixin:
     # --- Pinch-off helpers ---------------------------------------------------
 
     def _score_component(self, component_mask: np.ndarray, image: np.ndarray) -> float:
+        """Assign a heuristic quality score to the candidate component."""
+
         if component_mask.dtype != bool:
             component_mask = component_mask.astype(bool)
         if not component_mask.any():
@@ -388,6 +397,8 @@ class DetectionMixin:
         pinch_radius: Optional[int] = None,
         min_area: int = 120,
     ) -> List[Tuple[np.ndarray, float]]:
+        """Split ``mask`` into plausible pit candidates by eroding thin links."""
+
         if mask.dtype != bool:
             mask = mask.astype(bool)
         if mask.sum() < min_area:
@@ -433,6 +444,8 @@ class DetectionMixin:
         seed_point=None,
         allow_multiple: bool = False,
     ) -> List[np.ndarray]:
+        """Convert component masks into closed contours sorted by score."""
+
         if not components:
             return []
 
@@ -479,6 +492,8 @@ class DetectionMixin:
 
     # --- Similar pit search ---------------------------------------------------
     def _compute_ref_stats(self, reference_profiles: List[dict]):
+        """Compute summary statistics for the supplied reference pit profiles."""
+
         ref_stats = {}
         for key in reference_profiles[0].keys():
             values = [p[key] for p in reference_profiles]
@@ -491,6 +506,8 @@ class DetectionMixin:
         return ref_stats
 
     def _candidate_regions(self, image: np.ndarray, ref_stats):
+        """Return labeled candidate regions seeded from ``ref_stats`` thresholds."""
+
         threshold = ref_stats["pit_bottom"]["mean"] + (
             ref_stats["edge_height"]["mean"] - ref_stats["pit_bottom"]["mean"]
         ) * 0.5
@@ -502,10 +519,14 @@ class DetectionMixin:
         return labeled, measure.regionprops(labeled, intensity_image=image)
 
     def _contour_from_region(self, labeled: np.ndarray, label_id: int):
+        """Convert a labeled connected component into a contour."""
+
         comp = labeled == label_id
         return mask_to_closed_contour(comp.astype(np.uint8))
 
     def find_similar_pits(self, image: np.ndarray, reference_profiles: List[dict]):
+        """Return pit candidates that match the provided reference profiles."""
+
         if not reference_profiles:
             return []
         ref_stats = self._compute_ref_stats(reference_profiles)
@@ -574,7 +595,11 @@ class DetectionMixin:
 
     # Proxy methods for mixin compatibility -----------------------------------
     def _iou(self, *args, **kwargs):  # pragma: no cover - forwarded to utils
+        """Proxy to maintain compatibility with :class:`TrackingMixin`."""
+
         return self.iou(*args, **kwargs)
 
     def _contains(self, *args, **kwargs):  # pragma: no cover - forwarded to utils
+        """Proxy for :func:`afm_tracker.utils.contains`."""
+
         return self.contains(*args, **kwargs)

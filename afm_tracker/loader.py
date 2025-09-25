@@ -1,4 +1,5 @@
-"""Image loading utilities for AFM pit analysis."""
+"""Load AFM image sequences and locate optional metadata sidecars."""
+
 from __future__ import annotations
 
 import os
@@ -58,7 +59,7 @@ def find_ibw_sidecar(png_path: Path) -> Optional[Path]:
 
 
 def load_image_series(image_folder: Path):
-    """Load grayscale PNG images and associated metadata."""
+    """Load grayscale PNG images, timestamps, and the nm-per-pixel scale."""
     images: List = []
     image_files: List[Path] = []
     timestamps: List[datetime] = []
