@@ -904,6 +904,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         rate_results = self.calculate_corrosion_rates()
         detail_rows = rate_results.get("details", []) if isinstance(rate_results, dict) else []
         summary_rows = rate_results.get("summary", []) if isinstance(rate_results, dict) else []
+        linkage_rows = rate_results.get("linkage", []) if isinstance(rate_results, dict) else []
 
         if detail_rows:
             detail_df = pd.DataFrame(detail_rows)
@@ -925,6 +926,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                         count=row["count"],
                     )
                 )
+
+        self._export_linkage_visualizations(output_dir, linkage_rows)
 
         print(f"Analysis artifacts saved to: {output_dir}")
 
@@ -955,15 +958,151 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             plt.savefig(output_file, dpi=150, bbox_inches="tight")
             plt.close(fig)
 
+    def _export_linkage_visualizations(self, output_dir: Path, linkage_rows: List[dict]) -> None:
+        if not linkage_rows:
+            return
+
+        link_dir = output_dir / "frame_links"
+        link_dir.mkdir(exist_ok=True)
+
+        for entry in linkage_rows:
+            old_idx = entry["old_frame"]
+            young_idx = entry["young_frame"]
+            pairs = entry.get("pairs", [])
+            if not pairs:
+                continue
+
+            old_image = self.images[old_idx]
+            young_image = self.images[young_idx]
+            shifted_young = entry.get("shifted_young_pits", {})
+            young_pits = entry.get("young_pits", {})
+            matched_young_ids = set(entry.get("matched_young_ids", []))
+            drift_x, drift_y = entry.get("drift", (0.0, 0.0))
+
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            ax_young, ax_old, ax_overlay = axes
+
+            for ax in axes:
+                ax.axis("off")
+
+            cmap = plt.cm.get_cmap("tab20", max(len(pairs), 1))
+
+            ax_young.imshow(young_image, cmap="hot")
+            ax_young.set_title(f"Young Frame {young_idx + 1}")
+
+            ax_old.imshow(old_image, cmap="hot")
+            ax_old.set_title(f"Old Frame {old_idx + 1}")
+
+            ax_overlay.imshow(old_image, cmap="hot")
+            ax_overlay.set_title(
+                f"Aligned Young (shift {drift_x:+.1f}, {drift_y:+.1f})"
+            )
+
+            for color_idx, pair in enumerate(pairs):
+                color = cmap(color_idx)
+                old_contour = pair.get("old_contour")
+                old_pid = pair.get("old_pit_id")
+                if old_contour is None or len(old_contour) == 0:
+                    continue
+
+                for ax in (ax_old, ax_overlay):
+                    ax.plot(old_contour[:, 1], old_contour[:, 0], color=color, linewidth=2)
+                    cx, cy = self._contour_centroid(old_contour)
+                    ax.text(
+                        cx,
+                        cy,
+                        f"{old_pid}",
+                        color=color,
+                        fontsize=9,
+                        ha="center",
+                        va="center",
+                        bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.35),
+                    )
+
+                for young_entry in pair.get("young_pits", []):
+                    young_pid = young_entry.get("young_pit_id")
+                    contour = young_entry.get("contour")
+                    shifted = young_entry.get("shifted_contour")
+                    if contour is not None and len(contour) > 0:
+                        ax_young.plot(
+                            contour[:, 1],
+                            contour[:, 0],
+                            color=color,
+                            linewidth=2,
+                            linestyle="-",
+                        )
+                        cx, cy = self._contour_centroid(contour)
+                        ax_young.text(
+                            cx,
+                            cy,
+                            f"{young_pid}",
+                            color=color,
+                            fontsize=9,
+                            ha="center",
+                            va="center",
+                            bbox=dict(
+                                boxstyle="round,pad=0.15",
+                                facecolor="black",
+                                alpha=0.35,
+                            ),
+                        )
+                    if shifted is not None and len(shifted) > 0:
+                        ax_overlay.plot(
+                            shifted[:, 1],
+                            shifted[:, 0],
+                            color=color,
+                            linewidth=2,
+                            linestyle="--",
+                        )
+
+            unmatched_young = [
+                pid for pid in young_pits.keys() if pid not in matched_young_ids
+            ]
+            for pid in unmatched_young:
+                contour = young_pits.get(pid)
+                if contour is None or len(contour) == 0:
+                    continue
+                ax_young.plot(
+                    contour[:, 1],
+                    contour[:, 0],
+                    color="white",
+                    linewidth=1.5,
+                    linestyle=":",
+                    alpha=0.7,
+                )
+                cx, cy = self._contour_centroid(contour)
+                ax_young.text(
+                    cx,
+                    cy,
+                    f"{pid}",
+                    color="white",
+                    fontsize=8,
+                    ha="center",
+                    va="center",
+                    bbox=dict(boxstyle="round,pad=0.1", facecolor="black", alpha=0.4),
+                )
+
+            fig.tight_layout()
+            outfile = link_dir / f"frame_{young_idx + 1:03d}_to_{old_idx + 1:03d}.png"
+            fig.savefig(outfile, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+    def _contour_centroid(self, contour: np.ndarray) -> tuple[float, float]:
+        if contour is None or len(contour) == 0:
+            return 0.0, 0.0
+        contour = np.asarray(contour)
+        return float(contour[:, 1].mean()), float(contour[:, 0].mean())
+
     def calculate_corrosion_rates(self):  # pragma: no cover
         if len(self.images) < 2:
-            return {"details": [], "summary": []}
+            return {"details": [], "summary": [], "linkage": []}
 
         shape = self.images[0].shape
         nm_per_px = float(self.nm_per_pixel or 1.0)
         edge_margin_px = 50
         details = []
         summary = []
+        linkage = []
 
         for old_idx in range(len(self.images) - 1, 0, -1):
             young_idx = old_idx - 1
@@ -1004,6 +1143,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                 delta_minutes = 1e-6
 
             frame_rates = []
+            pair_mappings = []
+            matched_young_ids: set[int] = set()
             for old_pid, old_contour in old_pits.items():
                 old_mask = mask_from_contour(old_contour, shape).astype(bool)
                 if not old_mask.any():
@@ -1022,6 +1163,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                     overlap_area += intersection
                     young_perimeter_sum += young_perimeters.get(young_pid, 0.0)
                     contributing_young.append(young_pid)
+                    matched_young_ids.add(young_pid)
 
                 perimeter_total = old_perimeter + young_perimeter_sum
                 avg_perimeter = perimeter_total / 2.0 if perimeter_total > 0 else 0.0
@@ -1047,6 +1189,20 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                     }
                 )
                 frame_rates.append(rate_nm_per_min)
+                pair_mappings.append(
+                    {
+                        "old_pit_id": old_pid,
+                        "old_contour": old_contour,
+                        "young_pits": [
+                            {
+                                "young_pit_id": yp,
+                                "contour": young_pits.get(yp),
+                                "shifted_contour": shifted_young.get(yp),
+                            }
+                            for yp in contributing_young
+                        ],
+                    }
+                )
 
             if frame_rates:
                 summary.append(
@@ -1062,7 +1218,21 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                     }
                 )
 
-        return {"details": details, "summary": summary}
+            if pair_mappings:
+                linkage.append(
+                    {
+                        "old_frame": old_idx,
+                        "young_frame": young_idx,
+                        "drift": (dx, dy),
+                        "old_pits": old_pits,
+                        "young_pits": young_pits,
+                        "shifted_young_pits": shifted_young,
+                        "pairs": pair_mappings,
+                        "matched_young_ids": list(matched_young_ids),
+                    }
+                )
+
+        return {"details": details, "summary": summary, "linkage": linkage}
 
     def _shift_contour(self, contour: np.ndarray, dx: float, dy: float, shape) -> np.ndarray:
         if contour is None or len(contour) == 0:
