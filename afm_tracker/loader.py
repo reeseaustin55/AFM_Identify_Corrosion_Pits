@@ -39,7 +39,19 @@ def load_image_series(image_folder: Path):
         if img is not None:
             images.append(img)
             image_files.append(png_file)
-            timestamp = os.path.getmtime(png_file)
+
+            # Prefer the timestamp from the paired IBW metadata file, if available.
+            ibw_path = png_file.with_suffix(".ibw")
+            if not ibw_path.exists():
+                # Some instruments export upper-case extensions; check for them too.
+                upper_ibw = png_file.with_suffix(".IBW")
+                ibw_path = upper_ibw if upper_ibw.exists() else ibw_path
+
+            if ibw_path.exists():
+                timestamp = ibw_path.stat().st_mtime
+            else:
+                timestamp = os.path.getmtime(png_file)
+
             timestamps.append(datetime.fromtimestamp(timestamp))
 
     if nm_per_pixel is None and images:
