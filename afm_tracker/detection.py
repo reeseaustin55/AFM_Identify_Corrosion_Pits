@@ -8,12 +8,8 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
 from skimage import measure, morphology
-from skimage.filters import gaussian, sobel
-from skimage.segmentation import (
-    active_contour,
-    morphological_geodesic_active_contour,
-    watershed,
-)
+from skimage.filters import gaussian
+from skimage.segmentation import active_contour, watershed
 
 from .profile import extract_pit_profile
 from .alignment import align_contour_to_gradient
@@ -42,12 +38,9 @@ class DetectionMixin:
 
         base = list(self.roi_halves)
         if getattr(self, "large_pit_mode", False):
-            if base:
-                max_half = max(base)
-            else:
-                max_half = 0
-            limit = int(min(image.shape) * 0.45)
-            step = 40
+            max_half = max(base) if base else 0
+            limit = int(min(image.shape) * 0.4)
+            step = max(30, int(limit * 0.08))
             extra = [half for half in range(max_half + step, limit + 1, step)]
             base.extend(extra)
         # Preserve order but remove duplicates
@@ -224,7 +217,7 @@ class DetectionMixin:
             return None
 
         roi_float = roi.astype(np.float32)
-        blur = cv2.GaussianBlur(roi_float, (0, 0), sigmaX=2.0, sigmaY=2.0)
+        blur = cv2.GaussianBlur(roi_float, (0, 0), sigmaX=1.6, sigmaY=1.6)
         norm = cv2.normalize(blur, None, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
         if not np.isfinite(norm).all():
             norm = blur
@@ -234,7 +227,7 @@ class DetectionMixin:
             return None
 
         candidate = None
-        for offset in np.linspace(0.05, 0.35, 7):
+        for offset in np.linspace(0.08, 0.3, 6):
             thr = seed_val + offset
             mask = norm <= thr
             if mask.sum() < 50:
@@ -248,9 +241,7 @@ class DetectionMixin:
                 continue
             if component_touches_edge(comp):
                 if touches_image_edge:
-                    # The ROI is clipped by the frame edge; avoid partial pits.
                     continue
-                # Otherwise try to give the detector another chance with a larger ROI.
                 candidate = comp
                 continue
             candidate = comp
@@ -274,47 +265,67 @@ class DetectionMixin:
             return None
         return labeled == lbl
 
-    def _geodesic_refine_mask(self, mask: np.ndarray, image: np.ndarray, seed_point):
-        """Use morphological geodesic active contours to clean up ``mask``."""
+    def _geodesic_refine_mask(
+        self, mask: np.ndarray, image: np.ndarray, seed_point
+    ) -> np.ndarray:
+        """Quickly clean up ``mask`` in a neighbourhood around the seed point."""
 
-        area = int(mask.sum())
-        if area < 200:
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        if not mask.any():
             return mask
 
-        img = gaussian(image.astype(np.float32), sigma=1.2, preserve_range=True)
-        grad = sobel(img)
-        gimage = 1.0 / (1.0 + grad * grad)
-        gmin, gmax = float(gimage.min()), float(gimage.max())
-        if gmax > gmin:
-            gimage = (gimage - gmin) / (gmax - gmin)
-
-        init = morphology.binary_closing(mask, morphology.disk(2))
-        init = morphology.remove_small_holes(init, area_threshold=max(128, int(area * 0.05)))
-        init = morphology.remove_small_objects(init, min_size=max(128, int(area * 0.05)))
-
-        levelset = morphological_geodesic_active_contour(
-            gimage,
-            80,
-            init.astype(float),
-            smoothing=2,
-            threshold="auto",
-            balloon=0.4,
-        )
-
-        refined = levelset > 0.5 if levelset.dtype != bool else levelset
-        refined = morphology.binary_closing(refined, morphology.disk(2))
-        refined = morphology.remove_small_holes(refined, area_threshold=max(128, int(area * 0.04)))
-        refined = morphology.remove_small_objects(refined, min_size=max(128, int(area * 0.04)))
+        area = int(mask.sum())
+        if area < 120:
+            return mask
 
         seed_x = int(round(seed_point[0]))
         seed_y = int(round(seed_point[1]))
-        kept = self._seed_component(refined, seed_x, seed_y)
-        if kept is None or not kept.any():
+        if not (0 <= seed_x < image.shape[1] and 0 <= seed_y < image.shape[0]):
             return mask
 
-        combined = kept | mask
-        combined = morphology.binary_closing(combined, morphology.disk(1))
-        return combined
+        rows = np.where(mask.any(axis=1))[0]
+        cols = np.where(mask.any(axis=0))[0]
+        if rows.size == 0 or cols.size == 0:
+            return mask
+
+        y0 = max(0, rows[0] - 6)
+        y1 = min(image.shape[0], rows[-1] + 7)
+        x0 = max(0, cols[0] - 6)
+        x1 = min(image.shape[1], cols[-1] + 7)
+
+        submask = mask[y0:y1, x0:x1]
+        subimg = image[y0:y1, x0:x1].astype(np.float32)
+        subimg = cv2.GaussianBlur(subimg, (0, 0), sigmaX=1.2, sigmaY=1.2)
+
+        seed_local = (seed_y - y0, seed_x - x0)
+        if not (0 <= seed_local[0] < submask.shape[0] and 0 <= seed_local[1] < submask.shape[1]):
+            return mask
+
+        seed_val = subimg[seed_local]
+        local_min = float(subimg.min())
+        local_max = float(subimg.max())
+        dynamic = max(1e-3, local_max - local_min)
+        threshold = min(seed_val + 0.12 * dynamic, local_max)
+
+        candidate = subimg <= threshold
+        candidate = morphology.binary_opening(candidate, morphology.disk(2))
+        candidate = morphology.binary_closing(candidate, morphology.disk(3))
+
+        comp = self._seed_component(candidate, seed_local[1], seed_local[0])
+        if comp is None or not comp.any():
+            comp = submask
+
+        refined = comp | submask
+        refined = morphology.binary_closing(refined, morphology.disk(2))
+        refined = morphology.binary_opening(refined, morphology.disk(1))
+        hole_thresh = max(96, int(area * 0.03))
+        refined = morphology.remove_small_holes(refined, area_threshold=hole_thresh)
+        refined = morphology.remove_small_objects(refined, min_size=hole_thresh)
+
+        result = np.zeros_like(mask, dtype=bool)
+        result[y0:y1, x0:x1] = refined
+        return result
 
     # --- Similar pit search ---------------------------------------------------
     def _compute_ref_stats(self, reference_profiles: List[dict]):

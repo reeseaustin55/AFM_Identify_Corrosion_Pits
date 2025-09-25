@@ -463,13 +463,24 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                 if overlap < 0.6:
                     continue
                 spill = (cand_mask & ~base_mask).sum() / (base_mask.sum() + 1e-6)
-                score = overlap - 0.25 * spill
+                score = overlap - 0.2 * spill
                 if score > best_score:
                     best_score = score
                     best = candidate
+                if best_score > 0.85:
+                    break
         finally:
             if need_large and not prev_large:
                 self.large_pit_mode = prev_large
+
+        if best is not None:
+            best_mask = mask_from_contour(best, image.shape).astype(bool)
+            combined = base_mask | best_mask
+            refined = self._geodesic_refine_mask(combined, image, (cx, cy))
+            if refined is not None and refined.any():
+                refined_contour = mask_to_closed_contour(refined.astype(np.uint8))
+                if refined_contour is not None:
+                    best = refined_contour
 
         if best is None:
             refined_mask = self._geodesic_refine_mask(base_mask, image, (cx, cy))

@@ -46,10 +46,8 @@ def align_contour_to_gradient(
 
     grad_x = cv2.Sobel(image.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(image.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
-    grad_mag = cv2.magnitude(grad_x, grad_y)
-
     centroid = np.mean(contour, axis=0)
-    search_distances = np.linspace(-inward, max_outward, 48)
+    search_distances = np.linspace(-inward, max_outward, 36)
     h, w = image.shape
     new_points = []
 
