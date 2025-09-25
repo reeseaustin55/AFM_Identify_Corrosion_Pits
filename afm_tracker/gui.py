@@ -124,31 +124,30 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         plt.ion()
         self.fig = plt.figure(figsize=(15, 10))
         self.ax = self.fig.add_subplot(111)
-        self.fig.subplots_adjust(bottom=0.42)
+        self.fig.subplots_adjust(bottom=0.45)
 
         # Buttons row 1
-        ax_add = plt.axes([0.06, 0.22, 0.10, 0.05])
-        ax_refit = plt.axes([0.17, 0.22, 0.10, 0.05])
-        ax_delete = plt.axes([0.28, 0.22, 0.10, 0.05])
-        ax_auto = plt.axes([0.39, 0.22, 0.12, 0.05])
-        ax_clear = plt.axes([0.52, 0.22, 0.10, 0.05])
-        ax_confirm = plt.axes([0.63, 0.22, 0.10, 0.05])
+        ax_add = plt.axes([0.06, 0.32, 0.10, 0.05])
+        ax_refit = plt.axes([0.17, 0.32, 0.10, 0.05])
+        ax_delete = plt.axes([0.28, 0.32, 0.10, 0.05])
+        ax_auto = plt.axes([0.39, 0.32, 0.12, 0.05])
+        ax_clear = plt.axes([0.52, 0.32, 0.10, 0.05])
+        ax_confirm = plt.axes([0.63, 0.32, 0.10, 0.05])
 
         # Buttons row 2
         ax_prev = plt.axes([0.06, 0.14, 0.10, 0.05])
         ax_next = plt.axes([0.17, 0.14, 0.10, 0.05])
-        ax_process = plt.axes([0.28, 0.14, 0.12, 0.05])
-        ax_export = plt.axes([0.41, 0.14, 0.10, 0.05])
-        ax_lasso = plt.axes([0.52, 0.14, 0.10, 0.05])
-        ax_circle = plt.axes([0.63, 0.14, 0.10, 0.05])
-        ax_manual = plt.axes([0.74, 0.14, 0.12, 0.05])
+        ax_lasso = plt.axes([0.28, 0.24, 0.10, 0.05])
+        ax_circle = plt.axes([0.39, 0.24, 0.12, 0.05])
+        ax_manual = plt.axes([0.52, 0.24, 0.12, 0.05])
 
         # Buttons row 3 (advanced tools)
-        ax_align = plt.axes([0.06, 0.08, 0.12, 0.05])
-        ax_select_all = plt.axes([0.19, 0.08, 0.12, 0.05])
-        ax_large_mode = plt.axes([0.32, 0.08, 0.18, 0.05])
-        ax_sigma = plt.axes([0.55, 0.02, 0.18, 0.03])
-        ax_pinch = plt.axes([0.75, 0.02, 0.18, 0.03])
+        ax_align = plt.axes([0.06, 0.16, 0.12, 0.05])
+        ax_select_all = plt.axes([0.19, 0.16, 0.12, 0.05])
+        ax_large_mode = plt.axes([0.32, 0.16, 0.18, 0.05])
+        ax_sigma = plt.axes([0.55, 0.16, 0.18, 0.03])
+        ax_pinch = plt.axes([0.75, 0.16, 0.18, 0.03])
+        ax_execute = plt.axes([0.06, 0.05, 0.88, 0.06])
 
         self.btn_add = Button(ax_add, "Add Mode")
         self.btn_refit = Button(ax_refit, "Refit+")
@@ -159,14 +158,18 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
 
         self.btn_prev = Button(ax_prev, "\u2190 Prev")
         self.btn_next = Button(ax_next, "Next \u2192")
-        self.btn_process = Button(ax_process, "Process All")
-        self.btn_export = Button(ax_export, "Export")
         self.btn_lasso = Button(ax_lasso, "Lasso")
         self.btn_circle = Button(ax_circle, "Circle ROI")
         self.btn_manual = Button(ax_manual, "Manual Trace")
         self.btn_align = Button(ax_align, "Align Edge")
         self.btn_select_all = Button(ax_select_all, "Select All")
         self.btn_large_mode = Button(ax_large_mode, "Large Fit: Off")
+        self.btn_execute = Button(
+            ax_execute,
+            "EXECUTE ANALYSIS",
+            color="#2d6a4f",
+            hovercolor="#40916c",
+        )
         self.blur_slider = Slider(
             ax_sigma,
             "Blur σ",
@@ -192,14 +195,13 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.btn_confirm.on_clicked(self.confirm_frame)
         self.btn_prev.on_clicked(self.prev_frame)
         self.btn_next.on_clicked(self.next_frame)
-        self.btn_process.on_clicked(self.process_all_frames)
-        self.btn_export.on_clicked(self.export_results)
         self.btn_lasso.on_clicked(self.activate_lasso)
         self.btn_circle.on_clicked(self.activate_circle)
         self.btn_manual.on_clicked(self.activate_manual)
         self.btn_align.on_clicked(self.align_selected_edges)
         self.btn_select_all.on_clicked(self.select_all_pits)
         self.btn_large_mode.on_clicked(self.toggle_large_fit_mode)
+        self.btn_execute.on_clicked(self.execute_analysis)
         self.blur_slider.on_changed(self._on_blur_sigma_change)
         self.pinch_slider.on_changed(self._on_pinch_radius_change)
 
@@ -779,30 +781,64 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                     )
             self.display_current_image()
 
-    def process_all_frames(self, _event=None):
-        if 0 not in self.pits:
-            print("Please set up frame 1 first!")
+    def execute_analysis(self, _event=None):
+        if not self._ensure_all_frames_tracked():
             return
-        print("Processing all frames...")
-        for frame_idx in range(1, len(self.images)):
-            if frame_idx not in self.pits:
-                print(f"Processing frame {frame_idx + 1}...")
-                self.pits[frame_idx] = self.track_pits_to_next_frame(frame_idx - 1, frame_idx)
-        print("All frames processed!")
-        self.display_current_image()
 
-    def export_results(self, _event=None):
-        print("Exporting results...")
+        print("Executing corrosion analysis...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = self.image_folder / f"pit_analysis_{timestamp}"
         output_dir.mkdir(exist_ok=True)
 
-        for frame_idx in range(len(self.images)):
-            if frame_idx not in self.pits:
+        self._export_overlay_images(output_dir)
+
+        rate_results = self.calculate_corrosion_rates()
+        detail_rows = rate_results.get("details", []) if isinstance(rate_results, dict) else []
+        summary_rows = rate_results.get("summary", []) if isinstance(rate_results, dict) else []
+
+        if detail_rows:
+            detail_df = pd.DataFrame(detail_rows)
+            detail_df.to_csv(output_dir / "corrosion_rates.csv", index=False)
+            print(f"Saved corrosion rates for {len(detail_df)} pit transitions.")
+        else:
+            print("No corrosion rates could be computed.")
+
+        if summary_rows:
+            summary_df = pd.DataFrame(summary_rows)
+            summary_df.to_csv(output_dir / "corrosion_rate_summary.csv", index=False)
+            for row in summary_rows:
+                print(
+                    "Frame {old}->{young}: mean={mean:.3f} nm/min, std={std:.3f} nm/min (n={count})".format(
+                        old=row["old_frame"],
+                        young=row["young_frame"],
+                        mean=row["mean_rate_nm_per_min"],
+                        std=row["std_rate_nm_per_min"],
+                        count=row["count"],
+                    )
+                )
+
+        print(f"Analysis artifacts saved to: {output_dir}")
+
+    def _ensure_all_frames_tracked(self) -> bool:
+        if 0 not in self.pits or not self.pits[0]:
+            print("Please add pits on the first frame before running the analysis.")
+            return False
+
+        for frame_idx in range(1, len(self.images)):
+            if frame_idx not in self.pits or not self.pits[frame_idx]:
+                print(f"Tracking pits for frame {frame_idx + 1}...")
+                tracked = self.track_pits_to_next_frame(frame_idx - 1, frame_idx)
+                self.pits[frame_idx] = tracked
+        return True
+
+    def _export_overlay_images(self, output_dir: Path) -> None:
+        for frame_idx, image in enumerate(self.images):
+            contours = self.pits.get(frame_idx, {})
+            if not contours:
                 continue
             fig, ax = plt.subplots(figsize=(10, 10))
-            ax.imshow(self.images[frame_idx], cmap="hot")
-            for _, contour in self.pits[frame_idx].items():
+            ax.imshow(image, cmap="hot")
+            for _, contour in contours.items():
                 ax.plot(contour[:, 1], contour[:, 0], "cyan", linewidth=2)
             ax.set_title(f"Frame {frame_idx + 1}")
             ax.axis("off")
@@ -810,13 +846,131 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             plt.savefig(output_file, dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-        rates = self.calculate_corrosion_rates()
-        if rates:
-            df = pd.DataFrame(rates)
-            df.to_csv(output_dir / "corrosion_rates.csv", index=False)
-            print(f"Saved corrosion rates for {len(df)} transitions.")
-        print(f"Results exported to: {output_dir}")
-
-    # Placeholder - to be implemented or overridden as needed
     def calculate_corrosion_rates(self):  # pragma: no cover
-        return []
+        if len(self.images) < 2:
+            return {"details": [], "summary": []}
+
+        shape = self.images[0].shape
+        nm_per_px = float(self.nm_per_pixel or 1.0)
+        details = []
+        summary = []
+
+        for old_idx in range(len(self.images) - 1, 0, -1):
+            young_idx = old_idx - 1
+            old_pits = self.pits.get(old_idx, {})
+            if not old_pits:
+                continue
+
+            young_pits = self.pits.get(young_idx, {})
+            dx, dy = self.correct_drift(young_idx, old_idx)
+            shifted_young = {
+                pid: self._shift_contour(contour, dx, dy, shape)
+                for pid, contour in young_pits.items()
+            }
+
+            young_masks = {
+                pid: mask_from_contour(contour, shape).astype(bool)
+                for pid, contour in shifted_young.items()
+            }
+            young_perimeters = {
+                pid: self._contour_perimeter(contour)
+                for pid, contour in shifted_young.items()
+            }
+
+            delta_minutes = self._frame_time_delta_minutes(young_idx, old_idx)
+            if delta_minutes <= 0:
+                delta_minutes = 1e-6
+
+            frame_rates = []
+            for old_pid, old_contour in old_pits.items():
+                old_mask = mask_from_contour(old_contour, shape).astype(bool)
+                if not old_mask.any():
+                    continue
+
+                old_area = float(old_mask.sum())
+                old_perimeter = self._contour_perimeter(old_contour)
+
+                overlap_area = 0.0
+                young_perimeter_sum = 0.0
+                contributing_young: List[int] = []
+                for young_pid, young_mask in young_masks.items():
+                    intersection = float(np.logical_and(young_mask, old_mask).sum())
+                    if intersection <= 0:
+                        continue
+                    overlap_area += intersection
+                    young_perimeter_sum += young_perimeters.get(young_pid, 0.0)
+                    contributing_young.append(young_pid)
+
+                perimeter_total = old_perimeter + young_perimeter_sum
+                avg_perimeter = perimeter_total / 2.0 if perimeter_total > 0 else 0.0
+                if avg_perimeter <= 0:
+                    continue
+
+                net_growth_px = old_area - overlap_area
+                growth_nm = (net_growth_px / avg_perimeter) * nm_per_px
+                rate_nm_per_min = growth_nm / delta_minutes
+
+                details.append(
+                    {
+                        "old_frame": old_idx + 1,
+                        "young_frame": young_idx + 1,
+                        "old_pit_id": old_pid,
+                        "young_pit_ids": ";".join(map(str, contributing_young)),
+                        "old_area_px": old_area,
+                        "overlap_area_px": overlap_area,
+                        "net_growth_px": net_growth_px,
+                        "growth_nm": growth_nm,
+                        "rate_nm_per_min": rate_nm_per_min,
+                        "time_delta_min": delta_minutes,
+                    }
+                )
+                frame_rates.append(rate_nm_per_min)
+
+            if frame_rates:
+                summary.append(
+                    {
+                        "old_frame": old_idx + 1,
+                        "young_frame": young_idx + 1,
+                        "count": len(frame_rates),
+                        "mean_rate_nm_per_min": float(np.mean(frame_rates)),
+                        "std_rate_nm_per_min": float(np.std(frame_rates, ddof=1))
+                        if len(frame_rates) > 1
+                        else 0.0,
+                        "time_delta_min": delta_minutes,
+                    }
+                )
+
+        return {"details": details, "summary": summary}
+
+    def _shift_contour(self, contour: np.ndarray, dx: float, dy: float, shape) -> np.ndarray:
+        if contour is None or len(contour) == 0:
+            return contour
+        shifted = contour.astype(np.float32).copy()
+        shifted[:, 0] = np.clip(shifted[:, 0] + dy, 0, shape[0] - 1)
+        shifted[:, 1] = np.clip(shifted[:, 1] + dx, 0, shape[1] - 1)
+        return shifted
+
+    def _contour_perimeter(self, contour: np.ndarray) -> float:
+        if contour is None or len(contour) < 3:
+            return 0.0
+        pts = np.array([(float(x), float(y)) for y, x in contour], dtype=np.float32)
+        pts = pts.reshape((-1, 1, 2)).astype(np.float32)
+        return float(cv2.arcLength(pts, True))
+
+    def _get_frame_timestamp(self, idx: int) -> Optional[datetime]:
+        if not self.image_files or idx >= len(self.image_files):
+            return self.timestamps[idx] if idx < len(self.timestamps) else None
+        png_path = self.image_files[idx]
+        ibw_path = png_path.with_suffix(".ibw")
+        if ibw_path.exists():
+            return datetime.fromtimestamp(ibw_path.stat().st_mtime)
+        if idx < len(self.timestamps):
+            return self.timestamps[idx]
+        return None
+
+    def _frame_time_delta_minutes(self, young_idx: int, old_idx: int) -> float:
+        old_ts = self._get_frame_timestamp(old_idx)
+        young_ts = self._get_frame_timestamp(young_idx)
+        if old_ts is None or young_ts is None:
+            return 0.0
+        return max((old_ts - young_ts).total_seconds(), 0.0) / 60.0
