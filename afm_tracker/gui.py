@@ -433,21 +433,50 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         best = None
         best_score = -np.inf
 
-        for method in range(3):
-            candidate = self.detect_pit_edge(image, (cx, cy), method=method)
-            if candidate is None:
-                continue
-            cand_mask = mask_from_contour(candidate, image.shape)
-            if cand_mask.sum() == 0:
-                continue
-            overlap = (base_mask & cand_mask).sum() / (base_mask.sum() + 1e-6)
-            if overlap < 0.6:
-                continue
-            spill = (cand_mask & ~base_mask).sum() / (base_mask.sum() + 1e-6)
-            score = overlap - 0.25 * spill
-            if score > best_score:
-                best_score = score
-                best = candidate
+        mask_rows = np.any(base_mask, axis=1)
+        mask_cols = np.any(base_mask, axis=0)
+        if mask_rows.any() and mask_cols.any():
+            min_row, max_row = np.where(mask_rows)[0][[0, -1]]
+            min_col, max_col = np.where(mask_cols)[0][[0, -1]]
+            bbox_half = max(max_row - min_row, max_col - min_col) / 2.0
+        else:
+            bbox_half = 0.0
+        need_large = bbox_half > max(self.roi_halves, default=0) * 0.9 or base_mask.sum() > 5000
+
+        methods = [0, 1, 2]
+        if need_large or getattr(self, "large_pit_mode", False):
+            methods = [3] + methods
+
+        prev_large = self.large_pit_mode
+        if need_large and not prev_large:
+            self.large_pit_mode = True
+
+        try:
+            for method in methods:
+                candidate = self.detect_pit_edge(image, (cx, cy), method=method)
+                if candidate is None:
+                    continue
+                cand_mask = mask_from_contour(candidate, image.shape)
+                if cand_mask.sum() == 0:
+                    continue
+                overlap = (base_mask & cand_mask).sum() / (base_mask.sum() + 1e-6)
+                if overlap < 0.6:
+                    continue
+                spill = (cand_mask & ~base_mask).sum() / (base_mask.sum() + 1e-6)
+                score = overlap - 0.25 * spill
+                if score > best_score:
+                    best_score = score
+                    best = candidate
+        finally:
+            if need_large and not prev_large:
+                self.large_pit_mode = prev_large
+
+        if best is None:
+            refined_mask = self._geodesic_refine_mask(base_mask, image, (cx, cy))
+            if refined_mask is not None and refined_mask.any():
+                refined_contour = mask_to_closed_contour(refined_mask.astype(np.uint8))
+                if refined_contour is not None:
+                    best = refined_contour
 
         if best is None:
             best = contour

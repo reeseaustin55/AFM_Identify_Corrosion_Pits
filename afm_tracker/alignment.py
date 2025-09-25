@@ -6,6 +6,7 @@ from typing import Optional
 import cv2
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 from .utils import mask_from_contour, mask_to_closed_contour
 
@@ -37,6 +38,7 @@ def align_contour_to_gradient(
     max_outward: float = 25.0,
     inward: float = 2.0,
     smooth_sigma: float = 1.5,
+    distance_penalty: float = 0.4,
 ) -> Optional[np.ndarray]:
     """Align ``contour`` with the strongest gradient along radial search rays."""
     if contour is None or len(contour) < 3:
@@ -59,18 +61,73 @@ def align_contour_to_gradient(
             continue
         direction /= norm
 
-        best_score = -np.inf
-        best_point = np.array([y, x], dtype=np.float32)
+        samples = []
         for dist in search_distances:
             sy = y + direction[0] * dist
             sx = x + direction[1] * dist
             if sy < 0 or sy >= h or sx < 0 or sx >= w:
+                samples.append((dist, None, None, 0.0))
                 continue
-            score = _bilinear_interpolate(grad_mag, sy, sx)
-            if score > best_score:
-                best_score = score
-                best_point = np.array([sy, sx], dtype=np.float32)
-        new_points.append(best_point)
+            gx = _bilinear_interpolate(grad_x, sy, sx)
+            gy = _bilinear_interpolate(grad_y, sy, sx)
+            normal_strength = gx * direction[1] + gy * direction[0]
+            samples.append((dist, sy, sx, normal_strength if np.isfinite(normal_strength) else 0.0))
+
+        dists = np.array([s[0] for s in samples], dtype=np.float32)
+        normal_vals = np.array([s[3] for s in samples], dtype=np.float32)
+        if normal_vals.size == 0:
+            new_points.append([y, x])
+            continue
+
+        # Smooth the response so jagged gradients do not cause large jumps.
+        smoothed = gaussian_filter1d(normal_vals, sigma=1.0, mode="nearest")
+        origin_idx = int(np.argmin(np.abs(dists)))
+        origin_val = smoothed[origin_idx]
+
+        # Penalise distant moves so we stay near the current edge when the
+        # gradient strength is comparable.
+        penalties = distance_penalty * np.abs(dists)
+        scored = smoothed - penalties
+
+        # Search outward (positive distances) for the first prominent peak.
+        outward_idx = origin_idx
+        outward_vals = scored[origin_idx:]
+        if outward_vals.size > 1:
+            peaks, _ = find_peaks(outward_vals, prominence=1e-3)
+            if peaks.size > 0:
+                outward_idx = origin_idx + peaks[0]
+            else:
+                outward_idx = origin_idx + int(np.argmax(outward_vals))
+
+        # Search inward (negative distances) similarly.
+        inward_idx = origin_idx
+        inward_vals = scored[: origin_idx + 1]
+        if inward_vals.size > 1:
+            peaks, _ = find_peaks(inward_vals[::-1], prominence=1e-3)
+            if peaks.size > 0:
+                inward_idx = origin_idx - peaks[0]
+            else:
+                inward_idx = int(np.argmax(inward_vals))
+
+        candidate_indices = [origin_idx, outward_idx, inward_idx]
+        # Prefer candidates that genuinely improve the directional gradient.
+        candidate_scores = []
+        for idx in candidate_indices:
+            if idx == origin_idx:
+                candidate_scores.append(scored[idx])
+            elif smoothed[idx] <= origin_val:
+                candidate_scores.append(-np.inf)
+            else:
+                candidate_scores.append(scored[idx])
+        best_choice = int(np.argmax(candidate_scores))
+        best_idx = int(candidate_indices[best_choice])
+        if candidate_scores[best_choice] <= scored[origin_idx] + 1e-3:
+            best_idx = origin_idx
+        best = samples[best_idx]
+        if best[1] is None:
+            new_points.append([y, x])
+        else:
+            new_points.append([best[1], best[2]])
 
     new_contour = np.array(new_points, dtype=np.float32)
     if smooth_sigma > 0:

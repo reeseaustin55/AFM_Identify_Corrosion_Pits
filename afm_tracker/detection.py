@@ -7,10 +7,16 @@ import cv2
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
-from skimage import morphology, measure
-from skimage.segmentation import watershed, active_contour
+from skimage import measure, morphology
+from skimage.filters import gaussian, sobel
+from skimage.segmentation import (
+    active_contour,
+    morphological_geodesic_active_contour,
+    watershed,
+)
 
 from .profile import extract_pit_profile
+from .alignment import align_contour_to_gradient
 from .utils import (
     component_touches_edge,
     mask_from_contour,
@@ -96,8 +102,46 @@ class DetectionMixin:
                 contour[:, 0] += bounds.y0
 
                 if point_in_contour(contour, x, y, image.shape):
-                    return contour
+                    refined = self._post_process_contour(
+                        contour,
+                        image,
+                        seed_point=(x, y),
+                    )
+                    return refined if refined is not None else contour
         return None
+
+    def _post_process_contour(self, contour, image, seed_point):
+        """Refine ``contour`` to better follow edges while keeping the seed inside."""
+
+        if contour is None or len(contour) < 3:
+            return contour
+
+        mask = mask_from_contour(contour, image.shape).astype(bool)
+        area = int(mask.sum())
+        if area == 0:
+            return contour
+
+        refined_mask = self._geodesic_refine_mask(mask, image, seed_point)
+        if refined_mask is not None and refined_mask.any():
+            new_contour = mask_to_closed_contour(refined_mask.astype(np.uint8))
+            if (
+                new_contour is not None
+                and point_in_contour(new_contour, seed_point[0], seed_point[1], image.shape)
+            ):
+                contour = new_contour
+
+        aligned = align_contour_to_gradient(
+            contour,
+            image,
+            max_outward=min(40.0, max(image.shape) * 0.08),
+            inward=4.0,
+            smooth_sigma=1.0,
+            distance_penalty=0.6,
+        )
+        if aligned is not None and len(aligned) >= 3:
+            if point_in_contour(aligned, seed_point[0], seed_point[1], image.shape):
+                return aligned
+        return contour
 
     # --- Component generation -------------------------------------------------
     def _height_threshold_component(self, roi: np.ndarray, x: int, y: int):
@@ -153,8 +197,6 @@ class DetectionMixin:
         n_points, radius = 80, 20
         theta = np.linspace(0, 2 * np.pi, n_points)
         ic = np.column_stack([y + radius * np.sin(theta), x + radius * np.cos(theta)])
-        from skimage.filters import gaussian
-
         sm = gaussian(roi, 2, preserve_range=True)
         gx = cv2.Sobel(sm.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(sm.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
@@ -231,6 +273,48 @@ class DetectionMixin:
         if lbl == 0:
             return None
         return labeled == lbl
+
+    def _geodesic_refine_mask(self, mask: np.ndarray, image: np.ndarray, seed_point):
+        """Use morphological geodesic active contours to clean up ``mask``."""
+
+        area = int(mask.sum())
+        if area < 200:
+            return mask
+
+        img = gaussian(image.astype(np.float32), sigma=1.2, preserve_range=True)
+        grad = sobel(img)
+        gimage = 1.0 / (1.0 + grad * grad)
+        gmin, gmax = float(gimage.min()), float(gimage.max())
+        if gmax > gmin:
+            gimage = (gimage - gmin) / (gmax - gmin)
+
+        init = morphology.binary_closing(mask, morphology.disk(2))
+        init = morphology.remove_small_holes(init, area_threshold=max(128, int(area * 0.05)))
+        init = morphology.remove_small_objects(init, min_size=max(128, int(area * 0.05)))
+
+        levelset = morphological_geodesic_active_contour(
+            gimage,
+            80,
+            init.astype(float),
+            smoothing=2,
+            threshold="auto",
+            balloon=0.4,
+        )
+
+        refined = levelset > 0.5 if levelset.dtype != bool else levelset
+        refined = morphology.binary_closing(refined, morphology.disk(2))
+        refined = morphology.remove_small_holes(refined, area_threshold=max(128, int(area * 0.04)))
+        refined = morphology.remove_small_objects(refined, min_size=max(128, int(area * 0.04)))
+
+        seed_x = int(round(seed_point[0]))
+        seed_y = int(round(seed_point[1]))
+        kept = self._seed_component(refined, seed_x, seed_y)
+        if kept is None or not kept.any():
+            return mask
+
+        combined = kept | mask
+        combined = morphology.binary_closing(combined, morphology.disk(1))
+        return combined
 
     # --- Similar pit search ---------------------------------------------------
     def _compute_ref_stats(self, reference_profiles: List[dict]):
