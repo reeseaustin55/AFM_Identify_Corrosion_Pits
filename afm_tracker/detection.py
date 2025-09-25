@@ -1,16 +1,18 @@
 """Pit detection and refinement helpers."""
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
-from skimage import morphology, measure
-from skimage.segmentation import watershed, active_contour
+from skimage import measure, morphology
+from skimage.filters import gaussian
+from skimage.segmentation import active_contour, watershed
 
 from .profile import extract_pit_profile
+from .alignment import align_contour_to_gradient
 from .utils import (
     component_touches_edge,
     mask_from_contour,
@@ -25,11 +27,39 @@ class DetectionMixin:
 
     roi_halves: Sequence[int] = (80, 120, 160, 220)
 
-    def detect_pit_edge(self, image: np.ndarray, seed_point, method: int = 0):
-        x, y = int(seed_point[0]), int(seed_point[1])
-        method_order = ((method % 3), (method + 1) % 3, (method + 2) % 3)
+    def _roi_halves_for_image(self, image: np.ndarray) -> List[int]:
+        """Return ROI half-widths to try for the given image.
 
-        for half in self.roi_halves:
+        When ``large_pit_mode`` is enabled on the tracker we extend the search
+        window to cover substantially larger pits by appending progressively
+        larger half-widths up to ~45% of the frame's smaller dimension.  The
+        default behaviour is preserved when the toggle is off.
+        """
+
+        base = list(self.roi_halves)
+        if getattr(self, "large_pit_mode", False):
+            max_half = max(base) if base else 0
+            limit = int(min(image.shape) * 0.55)
+            step = max(30, int(limit * 0.06))
+            extra = [half for half in range(max_half + step, limit + 1, step)]
+            base.extend(extra)
+        # Preserve order but remove duplicates
+        seen: List[int] = []
+        for half in base:
+            if half not in seen:
+                seen.append(half)
+        return seen
+
+    def detect_pit_edge(self, image: np.ndarray, seed_point, method: int = 0):
+        """Return a contour around ``seed_point`` using several detection schemes."""
+        x, y = int(seed_point[0]), int(seed_point[1])
+        base_methods = ((method % 3), (method + 1) % 3, (method + 2) % 3)
+        method_order = list(base_methods)
+        if getattr(self, "large_pit_mode", False):
+            # Large pits often benefit from the adaptive component grower, try it first
+            method_order = [3] + [m for m in method_order if m != 3]
+
+        for half in self._roi_halves_for_image(image):
             bounds = roi_bounds(x, y, half=half, shape=image.shape)
             roi = image[bounds.y0 : bounds.y1, bounds.x0 : bounds.x1]
 
@@ -38,6 +68,18 @@ class DetectionMixin:
                     comp = self._height_threshold_component(roi, x - bounds.x0, y - bounds.y0)
                 elif m == 1:
                     comp = self._watershed_component(roi, x - bounds.x0, y - bounds.y0)
+                elif m == 3:
+                    comp = self._adaptive_large_component(
+                        roi,
+                        x - bounds.x0,
+                        y - bounds.y0,
+                        touches_image_edge=(
+                            bounds.x0 == 0
+                            or bounds.y0 == 0
+                            or bounds.x1 == image.shape[1]
+                            or bounds.y1 == image.shape[0]
+                        ),
+                    )
                 else:
                     comp = self._snake_component(roi, x - bounds.x0, y - bounds.y0)
 
@@ -54,11 +96,73 @@ class DetectionMixin:
                 contour[:, 0] += bounds.y0
 
                 if point_in_contour(contour, x, y, image.shape):
-                    return contour
+                    refined = self._post_process_contour(
+                        contour,
+                        image,
+                        seed_point=(x, y),
+                    )
+                    return refined if refined is not None else contour
         return None
+
+    def _current_blur_sigma(self) -> float:
+        """Return the Gaussian blur used to denoise ROIs before detection."""
+
+        return float(max(0.0, getattr(self, "detection_blur_sigma", 1.6)))
+
+    def _current_curvature_weight(self) -> float:
+        """Return the smoothness weight for gradient alignment."""
+
+        return float(max(0.0, getattr(self, "curvature_weight", 0.0)))
+
+    def _post_process_contour(self, contour, image, seed_point):
+        """Refine ``contour`` so that it better follows strong pit boundaries."""
+
+        if contour is None or len(contour) < 3:
+            return contour
+
+        mask = mask_from_contour(contour, image.shape).astype(bool)
+        area = int(mask.sum())
+        if area == 0:
+            return contour
+
+        refined_mask = self._geodesic_refine_mask(mask, image, seed_point)
+        if refined_mask is not None and refined_mask.any():
+            new_contour = mask_to_closed_contour(refined_mask.astype(np.uint8))
+            if (
+                new_contour is not None
+                and point_in_contour(new_contour, seed_point[0], seed_point[1], image.shape)
+            ):
+                contour = new_contour
+
+        aligned = align_contour_to_gradient(
+            contour,
+            image,
+            max_outward=min(40.0, max(image.shape) * 0.08),
+            inward=4.0,
+            smooth_sigma=1.0,
+            distance_penalty=0.6,
+            curvature_weight=self._current_curvature_weight(),
+        )
+        if aligned is not None and len(aligned) >= 3:
+            if point_in_contour(aligned, seed_point[0], seed_point[1], image.shape):
+                contour = aligned
+
+        pinch_masks = self._pinch_components(
+            mask_from_contour(contour, image.shape).astype(bool), image
+        )
+        finalized = self._components_to_contours(
+            pinch_masks,
+            image,
+            seed_point=seed_point,
+            allow_multiple=False,
+        )
+        if finalized:
+            return finalized[0]
+        return contour
 
     # --- Component generation -------------------------------------------------
     def _height_threshold_component(self, roi: np.ndarray, x: int, y: int):
+        """Segment the pit by thresholding a smoothed height histogram."""
         seed_value = roi[y, x]
         hist, bins = np.histogram(roi, bins=64)
         smooth_hist = gaussian_filter1d(hist.astype(float), sigma=2)
@@ -87,6 +191,7 @@ class DetectionMixin:
         return comp
 
     def _watershed_component(self, roi: np.ndarray, x: int, y: int):
+        """Grow a component from ``(x, y)`` using a Sobel-driven watershed."""
         den = cv2.bilateralFilter(roi.astype(np.uint8), 9, 75, 75)
         gx = cv2.Sobel(den, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(den, cv2.CV_32F, 0, 1, ksize=3)
@@ -111,9 +216,11 @@ class DetectionMixin:
         n_points, radius = 80, 20
         theta = np.linspace(0, 2 * np.pi, n_points)
         ic = np.column_stack([y + radius * np.sin(theta), x + radius * np.cos(theta)])
-        from skimage.filters import gaussian
-
-        sm = gaussian(roi, 2, preserve_range=True)
+        sigma = self._current_blur_sigma()
+        if sigma > 0:
+            sm = gaussian(roi, sigma, preserve_range=True)
+        else:
+            sm = roi
         gx = cv2.Sobel(sm.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(sm.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
         edge = np.sqrt(gx * gx + gy * gy)
@@ -127,8 +234,266 @@ class DetectionMixin:
             cv2.fillPoly(mask, [pts], 1)
         return mask.astype(bool) if mask.any() else None
 
+    def _adaptive_large_component(
+        self,
+        roi: np.ndarray,
+        x: int,
+        y: int,
+        touches_image_edge: bool = False,
+    ):
+        """Grow a smooth component around ``(x, y)`` that can span large pits."""
+
+        if not (0 <= x < roi.shape[1] and 0 <= y < roi.shape[0]):
+            return None
+
+        roi_float = roi.astype(np.float32)
+        sigma = self._current_blur_sigma()
+        if sigma > 0:
+            blur = cv2.GaussianBlur(roi_float, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        else:
+            blur = roi_float
+        norm = cv2.normalize(blur, None, alpha=0.0, beta=1.0, norm_type=cv2.NORM_MINMAX)
+        if not np.isfinite(norm).all():
+            norm = blur
+
+        seed_val = norm[y, x]
+        if not np.isfinite(seed_val):
+            return None
+
+        candidate = None
+        for offset in np.linspace(0.06, 0.45, 9):
+            thr = min(1.0, seed_val + offset)
+            mask = norm <= thr
+            if mask.sum() < 50:
+                continue
+            mask = morphology.binary_opening(mask, morphology.disk(3))
+            mask = morphology.binary_closing(mask, morphology.disk(5))
+            mask = morphology.remove_small_holes(mask, area_threshold=256)
+            mask = morphology.remove_small_objects(mask, 196)
+            comp = self._seed_component(mask, x, y)
+            if comp is None or not comp.any():
+                continue
+            if component_touches_edge(comp):
+                if not touches_image_edge:
+                    candidate = comp
+                    continue
+                # If the ROI already abuts the image boundary we keep the
+                # component even though it touches the crop edge, otherwise
+                # large pits that span most of the frame would be discarded.
+                candidate = comp
+                break
+            candidate = comp
+            break
+
+        if candidate is None or not candidate.any():
+            return None
+
+        return candidate
+
+    def _seed_component(self, mask: np.ndarray, x: int, y: int):
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        if not mask.any():
+            return None
+        labeled = measure.label(mask)
+        if not (0 <= y < labeled.shape[0] and 0 <= x < labeled.shape[1]):
+            return None
+        lbl = labeled[y, x]
+        if lbl == 0:
+            return None
+        return labeled == lbl
+
+    def _geodesic_refine_mask(
+        self, mask: np.ndarray, image: np.ndarray, seed_point
+    ) -> np.ndarray:
+        """Quickly clean up ``mask`` in a neighbourhood around the seed point."""
+
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        if not mask.any():
+            return mask
+
+        area = int(mask.sum())
+        if area < 120:
+            return mask
+
+        seed_x = int(round(seed_point[0]))
+        seed_y = int(round(seed_point[1]))
+        if not (0 <= seed_x < image.shape[1] and 0 <= seed_y < image.shape[0]):
+            return mask
+
+        rows = np.where(mask.any(axis=1))[0]
+        cols = np.where(mask.any(axis=0))[0]
+        if rows.size == 0 or cols.size == 0:
+            return mask
+
+        y0 = max(0, rows[0] - 6)
+        y1 = min(image.shape[0], rows[-1] + 7)
+        x0 = max(0, cols[0] - 6)
+        x1 = min(image.shape[1], cols[-1] + 7)
+
+        submask = mask[y0:y1, x0:x1]
+        subimg = image[y0:y1, x0:x1].astype(np.float32)
+        sigma = self._current_blur_sigma()
+        if sigma > 0:
+            subimg = cv2.GaussianBlur(subimg, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+        seed_local = (seed_y - y0, seed_x - x0)
+        if not (0 <= seed_local[0] < submask.shape[0] and 0 <= seed_local[1] < submask.shape[1]):
+            return mask
+
+        seed_val = subimg[seed_local]
+        local_min = float(subimg.min())
+        local_max = float(subimg.max())
+        dynamic = max(1e-3, local_max - local_min)
+        threshold = min(seed_val + 0.12 * dynamic, local_max)
+
+        candidate = subimg <= threshold
+        candidate = morphology.binary_opening(candidate, morphology.disk(2))
+        candidate = morphology.binary_closing(candidate, morphology.disk(3))
+
+        comp = self._seed_component(candidate, seed_local[1], seed_local[0])
+        if comp is None or not comp.any():
+            comp = submask
+
+        refined = comp | submask
+        refined = morphology.binary_closing(refined, morphology.disk(2))
+        refined = morphology.binary_opening(refined, morphology.disk(1))
+        hole_thresh = max(96, int(area * 0.03))
+        refined = morphology.remove_small_holes(refined, area_threshold=hole_thresh)
+        refined = morphology.remove_small_objects(refined, min_size=hole_thresh)
+
+        result = np.zeros_like(mask, dtype=bool)
+        result[y0:y1, x0:x1] = refined
+        return result
+
+    # --- Pinch-off helpers ---------------------------------------------------
+
+    def _score_component(self, component_mask: np.ndarray, image: np.ndarray) -> float:
+        """Assign a heuristic quality score to the candidate component."""
+
+        if component_mask.dtype != bool:
+            component_mask = component_mask.astype(bool)
+        if not component_mask.any():
+            return float("-inf")
+        values = image[component_mask]
+        mean_val = float(np.mean(values)) if values.size else 0.0
+        area = float(component_mask.sum())
+        return -mean_val + 0.03 * np.sqrt(area)
+
+    def _current_pinch_radius(self) -> int:
+        """Return the active pinch radius (in pixels)."""
+
+        try:
+            value = float(getattr(self, "pinch_distance_px", 3.0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            value = 3.0
+        return max(0, int(round(value)))
+
+    def _pinch_components(
+        self,
+        mask: np.ndarray,
+        image: np.ndarray,
+        pinch_radius: Optional[int] = None,
+        min_area: int = 120,
+    ) -> List[Tuple[np.ndarray, float]]:
+        """Split ``mask`` into plausible pit candidates by eroding thin links."""
+
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        if mask.sum() < min_area:
+            return [(mask, self._score_component(mask, image))]
+
+        if pinch_radius is None:
+            pinch_radius = self._current_pinch_radius()
+
+        if pinch_radius <= 0:
+            return [(mask, self._score_component(mask, image))]
+
+        opened = morphology.binary_opening(mask, morphology.disk(pinch_radius))
+        labeled = measure.label(opened)
+        if labeled.max() <= 1:
+            return [(mask, self._score_component(mask, image))]
+
+        selem = morphology.disk(max(1, pinch_radius))
+        components: List[Tuple[np.ndarray, float]] = []
+        for lbl in range(1, labeled.max() + 1):
+            core = labeled == lbl
+            if not core.any():
+                continue
+            expanded = morphology.binary_dilation(core, selem) & mask
+            expanded = morphology.remove_small_objects(expanded, min_size=min_area)
+            if not expanded.any():
+                continue
+            score = self._score_component(expanded, image)
+            components.append((expanded, score))
+
+        if not components:
+            return [(mask, self._score_component(mask, image))]
+
+        components.sort(key=lambda item: item[1], reverse=True)
+        best_score = components[0][1]
+        threshold = max(4.0, abs(best_score) * 0.1)
+        filtered = [item for item in components if item[1] >= best_score - threshold]
+        return filtered if filtered else components[:1]
+
+    def _components_to_contours(
+        self,
+        components: List[Tuple[np.ndarray, float]],
+        image: np.ndarray,
+        seed_point=None,
+        allow_multiple: bool = False,
+    ) -> List[np.ndarray]:
+        """Convert component masks into closed contours sorted by score."""
+
+        if not components:
+            return []
+
+        entries: List[Tuple[float, np.ndarray]] = []
+        seed_entry: Optional[Tuple[float, np.ndarray]] = None
+        for comp_mask, score in components:
+            contour = mask_to_closed_contour(comp_mask.astype(np.uint8))
+            if contour is None or len(contour) < 3:
+                continue
+            aligned = align_contour_to_gradient(
+                contour,
+                image,
+                smooth_sigma=0.8,
+                curvature_weight=self._current_curvature_weight(),
+            )
+            if aligned is not None and len(aligned) >= 3:
+                contour = aligned
+            entries.append((score, contour))
+            if seed_point is not None and point_in_contour(
+                contour, seed_point[0], seed_point[1], image.shape
+            ):
+                seed_entry = (score, contour)
+
+        if not entries:
+            return []
+
+        entries.sort(key=lambda item: item[0], reverse=True)
+
+        if seed_point is not None and not allow_multiple:
+            if seed_entry is not None:
+                return [seed_entry[1]]
+            return [entries[0][1]]
+
+        if not allow_multiple:
+            return [entries[0][1]]
+
+        best_score = entries[0][0]
+        threshold = max(4.0, abs(best_score) * 0.1)
+        return [
+            contour
+            for score, contour in entries
+            if score >= best_score - threshold and len(contour) >= 3
+        ]
+
     # --- Similar pit search ---------------------------------------------------
     def _compute_ref_stats(self, reference_profiles: List[dict]):
+        """Compute summary statistics for the supplied reference pit profiles."""
+
         ref_stats = {}
         for key in reference_profiles[0].keys():
             values = [p[key] for p in reference_profiles]
@@ -141,6 +506,8 @@ class DetectionMixin:
         return ref_stats
 
     def _candidate_regions(self, image: np.ndarray, ref_stats):
+        """Return labeled candidate regions seeded from ``ref_stats`` thresholds."""
+
         threshold = ref_stats["pit_bottom"]["mean"] + (
             ref_stats["edge_height"]["mean"] - ref_stats["pit_bottom"]["mean"]
         ) * 0.5
@@ -152,10 +519,14 @@ class DetectionMixin:
         return labeled, measure.regionprops(labeled, intensity_image=image)
 
     def _contour_from_region(self, labeled: np.ndarray, label_id: int):
+        """Convert a labeled connected component into a contour."""
+
         comp = labeled == label_id
         return mask_to_closed_contour(comp.astype(np.uint8))
 
     def find_similar_pits(self, image: np.ndarray, reference_profiles: List[dict]):
+        """Return pit candidates that match the provided reference profiles."""
+
         if not reference_profiles:
             return []
         ref_stats = self._compute_ref_stats(reference_profiles)
@@ -224,7 +595,11 @@ class DetectionMixin:
 
     # Proxy methods for mixin compatibility -----------------------------------
     def _iou(self, *args, **kwargs):  # pragma: no cover - forwarded to utils
+        """Proxy to maintain compatibility with :class:`TrackingMixin`."""
+
         return self.iou(*args, **kwargs)
 
     def _contains(self, *args, **kwargs):  # pragma: no cover - forwarded to utils
+        """Proxy for :func:`afm_tracker.utils.contains`."""
+
         return self.contains(*args, **kwargs)
