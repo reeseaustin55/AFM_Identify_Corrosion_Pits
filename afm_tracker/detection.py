@@ -364,16 +364,31 @@ class DetectionMixin:
         area = float(component_mask.sum())
         return -mean_val + 0.03 * np.sqrt(area)
 
+    def _current_pinch_radius(self) -> int:
+        """Return the active pinch radius (in pixels)."""
+
+        try:
+            value = float(getattr(self, "pinch_distance_px", 3.0))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            value = 3.0
+        return max(0, int(round(value)))
+
     def _pinch_components(
         self,
         mask: np.ndarray,
         image: np.ndarray,
-        pinch_radius: int = 3,
+        pinch_radius: Optional[int] = None,
         min_area: int = 120,
     ) -> List[Tuple[np.ndarray, float]]:
         if mask.dtype != bool:
             mask = mask.astype(bool)
         if mask.sum() < min_area:
+            return [(mask, self._score_component(mask, image))]
+
+        if pinch_radius is None:
+            pinch_radius = self._current_pinch_radius()
+
+        if pinch_radius <= 0:
             return [(mask, self._score_component(mask, image))]
 
         opened = morphology.binary_opening(mask, morphology.disk(pinch_radius))

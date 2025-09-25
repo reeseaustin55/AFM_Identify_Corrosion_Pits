@@ -95,6 +95,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.state = InteractiveState(manual_pts=[])
         self.large_pit_mode = False
         self.detection_blur_sigma = 1.6
+        self.pinch_distance_px = 3.0
 
     # ------------------------------------------------------------------
     # Basic geometry helpers (wrappers around utils)
@@ -123,7 +124,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         plt.ion()
         self.fig = plt.figure(figsize=(15, 10))
         self.ax = self.fig.add_subplot(111)
-        self.fig.subplots_adjust(bottom=0.38)
+        self.fig.subplots_adjust(bottom=0.42)
 
         # Buttons row 1
         ax_add = plt.axes([0.06, 0.22, 0.10, 0.05])
@@ -146,7 +147,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         ax_align = plt.axes([0.06, 0.08, 0.12, 0.05])
         ax_select_all = plt.axes([0.19, 0.08, 0.12, 0.05])
         ax_large_mode = plt.axes([0.32, 0.08, 0.18, 0.05])
-        ax_sigma = plt.axes([0.55, 0.02, 0.35, 0.03])
+        ax_sigma = plt.axes([0.55, 0.02, 0.18, 0.03])
+        ax_pinch = plt.axes([0.75, 0.02, 0.18, 0.03])
 
         self.btn_add = Button(ax_add, "Add Mode")
         self.btn_refit = Button(ax_refit, "Refit+")
@@ -173,6 +175,14 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             valinit=getattr(self, "detection_blur_sigma", 1.6),
             valstep=0.1,
         )
+        self.pinch_slider = Slider(
+            ax_pinch,
+            "Pinch px",
+            valmin=0.0,
+            valmax=12.0,
+            valinit=getattr(self, "pinch_distance_px", 3.0),
+            valstep=0.5,
+        )
 
         self.btn_add.on_clicked(self.toggle_add_mode)
         self.btn_refit.on_clicked(self.refit_selected_robust)
@@ -191,6 +201,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self.btn_select_all.on_clicked(self.select_all_pits)
         self.btn_large_mode.on_clicked(self.toggle_large_fit_mode)
         self.blur_slider.on_changed(self._on_blur_sigma_change)
+        self.pinch_slider.on_changed(self._on_pinch_radius_change)
 
         self.display_current_image()
         self.fig.canvas.mpl_connect("button_press_event", self.on_click)
@@ -409,6 +420,9 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
 
     def _on_blur_sigma_change(self, value):
         self.detection_blur_sigma = max(0.0, float(value))
+
+    def _on_pinch_radius_change(self, value):
+        self.pinch_distance_px = max(0.0, float(value))
 
     # ------------------------------------------------------------------
     # Pit management helpers
