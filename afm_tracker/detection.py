@@ -1,7 +1,7 @@
 """Pit detection and refinement helpers."""
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -136,7 +136,19 @@ class DetectionMixin:
         )
         if aligned is not None and len(aligned) >= 3:
             if point_in_contour(aligned, seed_point[0], seed_point[1], image.shape):
-                return aligned
+                contour = aligned
+
+        pinch_masks = self._pinch_components(
+            mask_from_contour(contour, image.shape).astype(bool), image
+        )
+        finalized = self._components_to_contours(
+            pinch_masks,
+            image,
+            seed_point=seed_point,
+            allow_multiple=False,
+        )
+        if finalized:
+            return finalized[0]
         return contour
 
     # --- Component generation -------------------------------------------------
@@ -339,6 +351,103 @@ class DetectionMixin:
         result = np.zeros_like(mask, dtype=bool)
         result[y0:y1, x0:x1] = refined
         return result
+
+    # --- Pinch-off helpers ---------------------------------------------------
+
+    def _score_component(self, component_mask: np.ndarray, image: np.ndarray) -> float:
+        if component_mask.dtype != bool:
+            component_mask = component_mask.astype(bool)
+        if not component_mask.any():
+            return float("-inf")
+        values = image[component_mask]
+        mean_val = float(np.mean(values)) if values.size else 0.0
+        area = float(component_mask.sum())
+        return -mean_val + 0.03 * np.sqrt(area)
+
+    def _pinch_components(
+        self,
+        mask: np.ndarray,
+        image: np.ndarray,
+        pinch_radius: int = 3,
+        min_area: int = 120,
+    ) -> List[Tuple[np.ndarray, float]]:
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+        if mask.sum() < min_area:
+            return [(mask, self._score_component(mask, image))]
+
+        opened = morphology.binary_opening(mask, morphology.disk(pinch_radius))
+        labeled = measure.label(opened)
+        if labeled.max() <= 1:
+            return [(mask, self._score_component(mask, image))]
+
+        selem = morphology.disk(max(1, pinch_radius))
+        components: List[Tuple[np.ndarray, float]] = []
+        for lbl in range(1, labeled.max() + 1):
+            core = labeled == lbl
+            if not core.any():
+                continue
+            expanded = morphology.binary_dilation(core, selem) & mask
+            expanded = morphology.remove_small_objects(expanded, min_size=min_area)
+            if not expanded.any():
+                continue
+            score = self._score_component(expanded, image)
+            components.append((expanded, score))
+
+        if not components:
+            return [(mask, self._score_component(mask, image))]
+
+        components.sort(key=lambda item: item[1], reverse=True)
+        best_score = components[0][1]
+        threshold = max(4.0, abs(best_score) * 0.1)
+        filtered = [item for item in components if item[1] >= best_score - threshold]
+        return filtered if filtered else components[:1]
+
+    def _components_to_contours(
+        self,
+        components: List[Tuple[np.ndarray, float]],
+        image: np.ndarray,
+        seed_point=None,
+        allow_multiple: bool = False,
+    ) -> List[np.ndarray]:
+        if not components:
+            return []
+
+        entries: List[Tuple[float, np.ndarray]] = []
+        seed_entry: Optional[Tuple[float, np.ndarray]] = None
+        for comp_mask, score in components:
+            contour = mask_to_closed_contour(comp_mask.astype(np.uint8))
+            if contour is None or len(contour) < 3:
+                continue
+            aligned = align_contour_to_gradient(contour, image, smooth_sigma=0.8)
+            if aligned is not None and len(aligned) >= 3:
+                contour = aligned
+            entries.append((score, contour))
+            if seed_point is not None and point_in_contour(
+                contour, seed_point[0], seed_point[1], image.shape
+            ):
+                seed_entry = (score, contour)
+
+        if not entries:
+            return []
+
+        entries.sort(key=lambda item: item[0], reverse=True)
+
+        if seed_point is not None and not allow_multiple:
+            if seed_entry is not None:
+                return [seed_entry[1]]
+            return [entries[0][1]]
+
+        if not allow_multiple:
+            return [entries[0][1]]
+
+        best_score = entries[0][0]
+        threshold = max(4.0, abs(best_score) * 0.1)
+        return [
+            contour
+            for score, contour in entries
+            if score >= best_score - threshold and len(contour) >= 3
+        ]
 
     # --- Similar pit search ---------------------------------------------------
     def _compute_ref_stats(self, reference_profiles: List[dict]):

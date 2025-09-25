@@ -305,11 +305,19 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         if not mask.any():
             print("Lasso region empty")
             return
-        contour = self._fit_drawn_mask(mask)
-        if contour is None:
+        contours = self._fit_drawn_mask(mask)
+        if not contours:
             print("Lasso failed to fit a pit to the selection")
             return
-        self._add_contour_as_pit(contour)
+        added = 0
+        for contour in contours:
+            before = len(self.pits.get(self.current_image_idx, {}))
+            self._add_contour_as_pit(contour)
+            after = len(self.pits.get(self.current_image_idx, {}))
+            if after > before:
+                added += 1
+        if added == 0:
+            print("Lasso selection overlapped existing pits; nothing added")
         self._deactivate_tools()
         self.mode = "select"
         self.display_current_image()
@@ -350,11 +358,12 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         ygrid, xgrid = np.mgrid[0:ny, 0:nx]
         mask = (xgrid - cx0) ** 2 + (ygrid - cy0) ** 2 <= r ** 2
         mask = morphology.binary_closing(mask, morphology.disk(2))
-        contour = self._fit_drawn_mask(mask)
-        if contour is None:
+        contours = self._fit_drawn_mask(mask)
+        if not contours:
             print("Circle ROI failed to fit a pit")
             return
-        self._add_contour_as_pit(contour)
+        for contour in contours:
+            self._add_contour_as_pit(contour)
         self._deactivate_tools()
         self.mode = "select"
         self.display_current_image()
@@ -430,12 +439,12 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         print(f"Added pit {pit_id} via interactive tool")
 
     def _fit_drawn_mask(self, mask: np.ndarray):
-        """Refine a drawn mask using the detector while respecting the selection."""
+        """Refine a drawn mask and return one or more pit contours covering it."""
 
         image = self.images[self.current_image_idx]
         contour = mask_to_closed_contour(mask.astype(np.uint8))
         if contour is None:
-            return None
+            return []
 
         cy = float(np.mean(contour[:, 0]))
         cx = float(np.mean(contour[:, 1]))
@@ -510,7 +519,28 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                 if overlap >= 0.6:
                     best = aligned
 
-        return best
+        pinch_masks = self._pinch_components(
+            mask_from_contour(best, image.shape).astype(bool), image
+        )
+        candidate_contours = self._components_to_contours(
+            pinch_masks,
+            image,
+            seed_point=(cx, cy),
+            allow_multiple=True,
+        )
+        if not candidate_contours:
+            return [best]
+
+        filtered: List[np.ndarray] = []
+        for cand in candidate_contours:
+            cand_mask = mask_from_contour(cand, image.shape)
+            if cand_mask.sum() == 0:
+                continue
+            overlap = (base_mask & cand_mask).sum() / (base_mask.sum() + 1e-6)
+            if overlap >= 0.45:
+                filtered.append(cand)
+
+        return filtered if filtered else candidate_contours
 
     def on_click(self, event):
         if event.inaxes != self.ax:
@@ -674,18 +704,32 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             print("Align Edge: no pits on this frame.")
             return
         aligned = 0
+        image = self.images[self.current_image_idx]
+        shape = image.shape
         for pit_id in list(self.selected_pit_ids):
             contour = self.pits[self.current_image_idx].get(pit_id)
             if contour is None:
                 continue
-            new_contour = align_contour_to_gradient(contour, self.images[self.current_image_idx])
+            new_contour = align_contour_to_gradient(contour, image)
             if new_contour is None:
                 continue
-            mask = mask_from_contour(new_contour, self.images[self.current_image_idx].shape)
+            pinch_masks = self._pinch_components(
+                mask_from_contour(new_contour, shape).astype(bool), image
+            )
+            finalized = self._components_to_contours(
+                pinch_masks,
+                image,
+                seed_point=(np.mean(new_contour[:, 1]), np.mean(new_contour[:, 0])),
+                allow_multiple=False,
+            )
+            if not finalized:
+                continue
+            new_contour = finalized[0]
+            mask = mask_from_contour(new_contour, shape)
             if mask.sum() < 20:
                 continue
             self.pits[self.current_image_idx][pit_id] = new_contour
-            profile = extract_pit_profile(new_contour, self.images[self.current_image_idx])
+            profile = extract_pit_profile(new_contour, image)
             if profile:
                 self.pit_profiles[pit_id] = profile
             aligned += 1
