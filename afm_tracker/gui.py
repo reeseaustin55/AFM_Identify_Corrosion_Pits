@@ -415,6 +415,15 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
             print("Manual trace failed to capture a region")
             self.state.manual_pts = []
             return
+        # Determine whether the trace forms a closed loop or should be used to split an existing pit
+        if np.linalg.norm(pts[0] - pts[-1]) > 5.0:
+            if not self._split_pit_with_trace(pts):
+                print("Manual trace did not split any pit; draw a closed loop to add a pit.")
+            self.state.manual_pts = []
+            self._deactivate_tools()
+            self.mode = "select"
+            self.display_current_image()
+            return
 
         contour = np.array([[p[1], p[0]] for p in pts], dtype=np.float32)
         contour = np.vstack([contour, contour[:1]])
@@ -422,7 +431,7 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         self._deactivate_tools()
         self.mode = "select"
         self.display_current_image()
-
+        
     def _on_blur_sigma_change(self, value):
         self.detection_blur_sigma = max(0.0, float(value))
 
@@ -432,6 +441,81 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
     # ------------------------------------------------------------------
     # Pit management helpers
     # ------------------------------------------------------------------
+    def _split_pit_with_trace(self, pts: np.ndarray) -> bool:
+        if self.current_image_idx not in self.pits or not self.pits[self.current_image_idx]:
+            print("Manual trace: no pits available to split.")
+            return False
+
+        image = self.images[self.current_image_idx]
+        height, width = image.shape
+        int_pts = np.round(pts).astype(int)
+        int_pts[:, 0] = np.clip(int_pts[:, 0], 0, width - 1)
+        int_pts[:, 1] = np.clip(int_pts[:, 1], 0, height - 1)
+
+        base_line = np.zeros_like(image, dtype=np.uint8)
+        for i in range(len(int_pts) - 1):
+            p0 = tuple(int_pts[i])
+            p1 = tuple(int_pts[i + 1])
+            if p0 == p1:
+                continue
+            cv2.line(base_line, p0, p1, color=1, thickness=1)
+
+        if not base_line.any():
+            print("Manual trace too narrow to split a pit.")
+            return False
+
+        line_masks = [base_line.astype(bool)]
+        for radius in (1, 2, 3):
+            line_masks.append(
+                morphology.binary_dilation(line_masks[0], morphology.disk(radius))
+            )
+
+        pits_in_frame = self.pits[self.current_image_idx]
+        shape = image.shape
+
+        for pit_id, contour in list(pits_in_frame.items()):
+            pit_mask = mask_from_contour(contour, shape)
+            if pit_mask.sum() < 40:
+                continue
+            for line_mask in line_masks:
+                if not (pit_mask & line_mask).any():
+                    continue
+                remaining = pit_mask & ~line_mask
+                if remaining.sum() < 40:
+                    continue
+                num_labels, labels = cv2.connectedComponents(
+                    remaining.astype(np.uint8), connectivity=8
+                )
+                components = []
+                for label in range(1, num_labels):
+                    comp_mask = labels == label
+                    if comp_mask.sum() < 40:
+                        continue
+                    contour_comp = mask_to_closed_contour(comp_mask.astype(np.uint8))
+                    if contour_comp is not None:
+                        components.append(contour_comp)
+                if len(components) < 2:
+                    continue
+
+                del pits_in_frame[pit_id]
+                self.pit_profiles.pop(pit_id, None)
+
+                new_ids = []
+                for comp_contour in components:
+                    new_id = self.next_pit_id
+                    self.next_pit_id += 1
+                    pits_in_frame[new_id] = comp_contour
+                    profile = extract_pit_profile(comp_contour, image)
+                    if profile:
+                        self.pit_profiles[new_id] = profile
+                    new_ids.append(new_id)
+                    print(f"Split pit {pit_id} into pit {new_id}")
+
+                self.selected_pit_ids = new_ids
+                return True
+
+        return False
+
     def _add_contour_as_pit(self, contour: np.ndarray):
         if self.current_image_idx not in self.pits:
             self.pits[self.current_image_idx] = {}
