@@ -961,16 +961,29 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
 
         shape = self.images[0].shape
         nm_per_px = float(self.nm_per_pixel or 1.0)
+        edge_margin_px = 50
         details = []
         summary = []
 
         for old_idx in range(len(self.images) - 1, 0, -1):
             young_idx = old_idx - 1
-            old_pits = self.pits.get(old_idx, {})
+            old_pits = {
+                pid: contour
+                for pid, contour in self.pits.get(old_idx, {}).items()
+                if contour is not None
+                and len(contour) > 0
+                and not self._contour_near_edge(contour, shape, edge_margin_px)
+            }
             if not old_pits:
                 continue
 
-            young_pits = self.pits.get(young_idx, {})
+            young_pits = {
+                pid: contour
+                for pid, contour in self.pits.get(young_idx, {}).items()
+                if contour is not None
+                and len(contour) > 0
+                and not self._contour_near_edge(contour, shape, edge_margin_px)
+            }
             dx, dy = self.correct_drift(young_idx, old_idx)
             shifted_young = {
                 pid: self._shift_contour(contour, dx, dy, shape)
@@ -1065,6 +1078,22 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         pts = np.array([(float(x), float(y)) for y, x in contour], dtype=np.float32)
         pts = pts.reshape((-1, 1, 2)).astype(np.float32)
         return float(cv2.arcLength(pts, True))
+
+    def _contour_near_edge(
+        self, contour: np.ndarray, shape, margin_px: int = 50
+    ) -> bool:
+        if contour is None or len(contour) == 0:
+            return True
+        contour = np.asarray(contour)
+        ys = contour[:, 0]
+        xs = contour[:, 1]
+        height, width = shape
+        return (
+            float(ys.min()) < margin_px
+            or float(xs.min()) < margin_px
+            or (height - 1 - float(ys.max())) < margin_px
+            or (width - 1 - float(xs.max())) < margin_px
+        )
 
     def _get_frame_timestamp(self, idx: int) -> Optional[datetime]:
         if not self.image_files or idx >= len(self.image_files):
