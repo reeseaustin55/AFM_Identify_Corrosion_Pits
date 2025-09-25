@@ -906,17 +906,29 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         summary_rows = rate_results.get("summary", []) if isinstance(rate_results, dict) else []
         linkage_rows = rate_results.get("linkage", []) if isinstance(rate_results, dict) else []
 
-        if detail_rows:
-            detail_df = pd.DataFrame(detail_rows)
+        detail_df = pd.DataFrame(detail_rows) if detail_rows else pd.DataFrame()
+        summary_df = pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame()
+
+        if not detail_df.empty:
             detail_df.to_csv(output_dir / "corrosion_rates.csv", index=False)
+        if not summary_df.empty:
+            summary_df.to_csv(output_dir / "corrosion_rate_summary.csv", index=False)
+
+        if not detail_df.empty or not summary_df.empty:
+            excel_path = output_dir / "corrosion_rates.xlsx"
+            with pd.ExcelWriter(excel_path) as writer:
+                if not detail_df.empty:
+                    detail_df.to_excel(writer, sheet_name="details", index=False)
+                if not summary_df.empty:
+                    summary_df.to_excel(writer, sheet_name="summary", index=False)
+
+        if not detail_df.empty:
             print(f"Saved corrosion rates for {len(detail_df)} pit transitions.")
         else:
             print("No corrosion rates could be computed.")
 
-        if summary_rows:
-            summary_df = pd.DataFrame(summary_rows)
-            summary_df.to_csv(output_dir / "corrosion_rate_summary.csv", index=False)
-            for row in summary_rows:
+        if not summary_df.empty:
+            for _, row in summary_df.iterrows():
                 print(
                     "Frame {old}->{young}: mean={mean:.3f} nm/min, std={std:.3f} nm/min (n={count})".format(
                         old=row["old_frame"],
@@ -1104,6 +1116,8 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         summary = []
         linkage = []
 
+        pixel_to_nm2 = float(nm_per_px ** 2)
+
         for old_idx in range(len(self.images) - 1, 0, -1):
             young_idx = old_idx - 1
             old_pits = {
@@ -1133,10 +1147,11 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                 pid: mask_from_contour(contour, shape).astype(bool)
                 for pid, contour in shifted_young.items()
             }
-            young_perimeters = {
+            young_perimeters_px = {
                 pid: self._contour_perimeter(contour)
                 for pid, contour in shifted_young.items()
             }
+            young_areas_px = {pid: float(mask.sum()) for pid, mask in young_masks.items()}
 
             delta_minutes = self._frame_time_delta_minutes(young_idx, old_idx)
             if delta_minutes <= 0:
@@ -1151,28 +1166,40 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                     continue
 
                 old_area = float(old_mask.sum())
-                old_perimeter = self._contour_perimeter(old_contour)
+                old_perimeter_px = self._contour_perimeter(old_contour)
+                old_perimeter_nm = old_perimeter_px * nm_per_px
 
                 overlap_area = 0.0
-                young_perimeter_sum = 0.0
+                young_perimeter_sum_px = 0.0
+                young_perimeter_sum_nm = 0.0
                 contributing_young: List[int] = []
+                young_perimeter_nm_list: List[float] = []
+                young_area_px_list: List[float] = []
                 for young_pid, young_mask in young_masks.items():
                     intersection = float(np.logical_and(young_mask, old_mask).sum())
                     if intersection <= 0:
                         continue
                     overlap_area += intersection
-                    young_perimeter_sum += young_perimeters.get(young_pid, 0.0)
+                    yp_perimeter_px = young_perimeters_px.get(young_pid, 0.0)
+                    young_perimeter_sum_px += yp_perimeter_px
+                    yp_perimeter_nm = yp_perimeter_px * nm_per_px
+                    young_perimeter_sum_nm += yp_perimeter_nm
+                    young_perimeter_nm_list.append(yp_perimeter_nm)
+                    young_area_px_list.append(young_areas_px.get(young_pid, 0.0))
                     contributing_young.append(young_pid)
                     matched_young_ids.add(young_pid)
 
-                perimeter_total = old_perimeter + young_perimeter_sum
-                avg_perimeter = perimeter_total / 2.0 if perimeter_total > 0 else 0.0
-                if avg_perimeter <= 0:
+                perimeter_total_nm = old_perimeter_nm + young_perimeter_sum_nm
+                avg_perimeter_nm = perimeter_total_nm / 2.0 if perimeter_total_nm > 0 else 0.0
+                if avg_perimeter_nm <= 0:
                     continue
 
                 net_growth_px = old_area - overlap_area
-                growth_nm = (net_growth_px / avg_perimeter) * nm_per_px
-                rate_nm_per_min = growth_nm / delta_minutes
+                net_growth_nm2 = net_growth_px * pixel_to_nm2
+                corrosion_nm = net_growth_nm2 / avg_perimeter_nm if avg_perimeter_nm > 0 else 0.0
+                corrosion_rate_nm_per_min = (
+                    corrosion_nm / delta_minutes if delta_minutes > 0 else 0.0
+                )
 
                 details.append(
                     {
@@ -1183,12 +1210,25 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
                         "old_area_px": old_area,
                         "overlap_area_px": overlap_area,
                         "net_growth_px": net_growth_px,
-                        "growth_nm": growth_nm,
-                        "rate_nm_per_min": rate_nm_per_min,
+                        "old_perimeter_px": old_perimeter_px,
+                        "old_perimeter_nm": old_perimeter_nm,
+                        "young_perimeters_nm": ";".join(
+                            f"{value:.6f}" for value in young_perimeter_nm_list
+                        ),
+                        "total_young_perimeter_px": young_perimeter_sum_px,
+                        "total_young_perimeter_nm": young_perimeter_sum_nm,
+                        "young_areas_px": ";".join(
+                            f"{value:.6f}" for value in young_area_px_list
+                        ),
+                        "avg_perimeter_nm": avg_perimeter_nm,
+                        "pixel_to_nm2": pixel_to_nm2,
+                        "net_growth_nm2": net_growth_nm2,
+                        "corrosion_nm": corrosion_nm,
+                        "corrosion_rate_nm_per_min": corrosion_rate_nm_per_min,
                         "time_delta_min": delta_minutes,
                     }
                 )
-                frame_rates.append(rate_nm_per_min)
+                frame_rates.append(corrosion_rate_nm_per_min)
                 pair_mappings.append(
                     {
                         "old_pit_id": old_pid,
