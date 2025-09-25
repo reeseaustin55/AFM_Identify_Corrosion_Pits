@@ -14,7 +14,12 @@ def find_ibw_sidecar(png_path: Path) -> Optional[Path]:
 
     Some export pipelines flip the case of the extension when copying files
     between systems, so we perform a case-insensitive search that still prefers
-    the straightforward ``.ibw`` match when available.
+    the straightforward ``.ibw`` match when available.  A number of AFM export
+    tools also prepend resolution information to the PNG filename (for
+    example ``1024px_250nm_``) while keeping the raw data sidecar named only
+    with the acquisition identifier (``X2_T5S180016.ibw``).  To support these
+    mixed naming schemes we progressively strip leading underscore-delimited
+    tokens from the PNG stem until we find a matching IBW sibling.
     """
 
     primary = png_path.with_suffix(".ibw")
@@ -25,10 +30,30 @@ def find_ibw_sidecar(png_path: Path) -> Optional[Path]:
     if alt.exists():
         return alt
 
-    stem = png_path.stem
+    png_stem = png_path.stem
+    png_lower = png_stem.lower()
+    candidates: List[Tuple[int, Path]] = []
+
     for sibling in png_path.parent.iterdir():
-        if sibling.stem == stem and sibling.suffix.lower() == ".ibw":
+        if sibling.suffix.lower() != ".ibw":
+            continue
+
+        sib_stem = sibling.stem
+        sib_lower = sib_stem.lower()
+        if sib_lower == png_lower:
             return sibling
+
+        if png_lower.endswith(sib_lower):
+            candidates.append((len(sib_lower), sibling))
+        elif sib_lower.endswith(png_lower):
+            candidates.append((len(png_lower), sibling))
+
+    if candidates:
+        # Prefer the longest overlap with the PNG stem so we pick the most
+        # specific match when multiple sidecars exist.
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
     return None
 
 

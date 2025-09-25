@@ -39,8 +39,8 @@ class DetectionMixin:
         base = list(self.roi_halves)
         if getattr(self, "large_pit_mode", False):
             max_half = max(base) if base else 0
-            limit = int(min(image.shape) * 0.4)
-            step = max(30, int(limit * 0.08))
+            limit = int(min(image.shape) * 0.55)
+            step = max(30, int(limit * 0.06))
             extra = [half for half in range(max_half + step, limit + 1, step)]
             base.extend(extra)
         # Preserve order but remove duplicates
@@ -250,8 +250,8 @@ class DetectionMixin:
             return None
 
         candidate = None
-        for offset in np.linspace(0.08, 0.3, 6):
-            thr = seed_val + offset
+        for offset in np.linspace(0.06, 0.45, 9):
+            thr = min(1.0, seed_val + offset)
             mask = norm <= thr
             if mask.sum() < 50:
                 continue
@@ -263,10 +263,14 @@ class DetectionMixin:
             if comp is None or not comp.any():
                 continue
             if component_touches_edge(comp):
-                if touches_image_edge:
+                if not touches_image_edge:
+                    candidate = comp
                     continue
+                # If the ROI already abuts the image boundary we keep the
+                # component even though it touches the crop edge, otherwise
+                # large pits that span most of the frame would be discarded.
                 candidate = comp
-                continue
+                break
             candidate = comp
             break
 
