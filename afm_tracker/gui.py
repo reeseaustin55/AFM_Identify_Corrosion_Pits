@@ -124,30 +124,33 @@ class SmartPitTracker(DetectionMixin, TrackingMixin):
         plt.ion()
         self.fig = plt.figure(figsize=(15, 10))
         self.ax = self.fig.add_subplot(111)
-        self.fig.subplots_adjust(bottom=0.45)
+        self.fig.subplots_adjust(bottom=0.42)
 
         # Buttons row 1
-        ax_add = plt.axes([0.06, 0.32, 0.10, 0.05])
-        ax_refit = plt.axes([0.17, 0.32, 0.10, 0.05])
-        ax_delete = plt.axes([0.28, 0.32, 0.10, 0.05])
-        ax_auto = plt.axes([0.39, 0.32, 0.12, 0.05])
-        ax_clear = plt.axes([0.52, 0.32, 0.10, 0.05])
-        ax_confirm = plt.axes([0.63, 0.32, 0.10, 0.05])
+        ax_add = plt.axes([0.06, 0.34, 0.10, 0.05])
+        ax_refit = plt.axes([0.18, 0.34, 0.10, 0.05])
+        ax_delete = plt.axes([0.30, 0.34, 0.10, 0.05])
+        ax_auto = plt.axes([0.42, 0.34, 0.12, 0.05])
+        ax_clear = plt.axes([0.56, 0.34, 0.10, 0.05])
+        ax_confirm = plt.axes([0.68, 0.34, 0.10, 0.05])
 
         # Buttons row 2
-        ax_prev = plt.axes([0.06, 0.14, 0.10, 0.05])
-        ax_next = plt.axes([0.17, 0.14, 0.10, 0.05])
-        ax_lasso = plt.axes([0.28, 0.24, 0.10, 0.05])
-        ax_circle = plt.axes([0.39, 0.24, 0.12, 0.05])
-        ax_manual = plt.axes([0.52, 0.24, 0.12, 0.05])
+        ax_prev = plt.axes([0.06, 0.26, 0.10, 0.05])
+        ax_next = plt.axes([0.18, 0.26, 0.10, 0.05])
+        ax_lasso = plt.axes([0.30, 0.26, 0.10, 0.05])
+        ax_circle = plt.axes([0.42, 0.26, 0.12, 0.05])
+        ax_manual = plt.axes([0.56, 0.26, 0.12, 0.05])
 
         # Buttons row 3 (advanced tools)
-        ax_align = plt.axes([0.06, 0.16, 0.12, 0.05])
-        ax_select_all = plt.axes([0.19, 0.16, 0.12, 0.05])
-        ax_large_mode = plt.axes([0.32, 0.16, 0.18, 0.05])
-        ax_sigma = plt.axes([0.55, 0.16, 0.18, 0.03])
-        ax_pinch = plt.axes([0.75, 0.16, 0.18, 0.03])
-        ax_execute = plt.axes([0.06, 0.05, 0.88, 0.06])
+        ax_align = plt.axes([0.06, 0.18, 0.12, 0.05])
+        ax_select_all = plt.axes([0.20, 0.18, 0.12, 0.05])
+        ax_large_mode = plt.axes([0.34, 0.18, 0.20, 0.05])
+
+        # Sliders row
+        ax_sigma = plt.axes([0.06, 0.10, 0.32, 0.035])
+        ax_pinch = plt.axes([0.42, 0.10, 0.32, 0.035])
+
+        ax_execute = plt.axes([0.06, 0.02, 0.88, 0.06])
 
         self.btn_add = Button(ax_add, "Add Mode")
         self.btn_refit = Button(ax_refit, "Refit+")
